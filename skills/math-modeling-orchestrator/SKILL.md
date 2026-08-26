@@ -20,7 +20,7 @@ Before routing, read [references/workflow.json](references/workflow.json) for th
 
 Invoke exactly the stage whose entry condition is satisfied:
 
-1. Invoke `$math-modeling-problem-analysis` for a new or materially ambiguous problem statement whose objectives, constraints, variables, metrics, or units are not yet explicit.
+1. Invoke `$math-modeling-problem-analysis` first for every new problem; resume or skip only when an existing handoff records that stage complete. Use its result to make objectives, constraints, variables, metrics, and units explicit before later stages.
 2. Invoke `$math-modeling-data-analysis` when relevant observational or supplied data exists and the problem definition is stable enough to assess it. Data analysis may be skipped only with a recorded reason when no relevant data work is needed.
 3. Invoke `$math-modeling-model-construction` when the analyzed problem and any relevant data implications are ready to be expressed as candidate mathematical formulations.
 4. Invoke `$math-modeling-model-solving` only when an accepted model, its parameters or parameter sources, domains, constraints, and solution interface are explicit.

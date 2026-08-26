@@ -21,6 +21,7 @@ WORKFLOW_PATH = (
     / "workflow.json"
 )
 HANDOFF_PATH = WORKFLOW_PATH.parent / "handoff-contract.md"
+ORCHESTRATOR_PATH = WORKFLOW_PATH.parents[1] / "SKILL.md"
 
 
 class RepositoryContractTests(unittest.TestCase):
@@ -76,6 +77,15 @@ class RepositoryContractTests(unittest.TestCase):
                 self.assertNotIn("state.stage", text)
                 self.assertNotIn("next.reason", text)
                 self.assertNotIn("next.needs", text)
+
+    def test_orchestrator_starts_every_new_problem_with_problem_analysis(self) -> None:
+        text = ORCHESTRATOR_PATH.read_text(encoding="utf-8").lower()
+        self.assertIn("$math-modeling-problem-analysis", text)
+        self.assertIn("first for every new problem", text)
+        self.assertIn(
+            "resume or skip only when an existing handoff records that stage complete",
+            text,
+        )
 
 
 if __name__ == "__main__":
