@@ -2499,7 +2499,7 @@ Run:
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-Expected: exactly 22 tests PASS (5 validator + 3 repository + 4 bundle + 5 cachebuster + 5 installer).
+Expected: exactly 37 tests PASS (12 validator + 7 repository + 7 bundle + 6 cachebuster + 5 installer).
 
 - [ ] **Step 3: Run source validation and the optional bundled Codex validators**
 
@@ -2563,4 +2563,4 @@ Expected: `math-modeling-suite@math-modeling-local` is installed/listed. Restart
 - **Spec coverage:** Tasks 1-2 cover manifest, seven skills, registry, handoff, skip/rollback gates, and independent discovery. Tasks 3-5 cover source/bundle separation, safe build, validation, cachebuster, dry-run/apply install, missing CLI behavior, and new-thread guidance. Tasks 6-7 cover architecture, README command consistency, deterministic behavior tests, optional bundled-validator compatibility, and no-push verification.
 - **Placeholder scan:** The plan contains no unfinished scaffold placeholders. Test fixtures intentionally search for the literal marker families through regular expressions rather than embedding unfinished content in generated plugin files.
 - **Type consistency:** `validate_suite(Path) -> list[str]`, `build_bundle(Path, Path) -> Path`, `validate_bundle(Path) -> list[str]`, `update_manifest(Path, str, apply=bool) -> tuple[str, str]`, and `install_local(Path, Path, ...) -> list[list[str]]` are used consistently across production code and tests.
-- **Test count:** Task 7 expects exactly 22 passing tests. If implementation legitimately adds or removes a test, update the documented count in the same commit so the verification claim remains exact.
+- **Test count:** Task 7 expects exactly 37 passing tests (12 validator + 7 repository + 7 bundle + 6 cachebuster + 5 installer). If implementation legitimately adds or removes a test, update the documented count in the same commit so the verification claim remains exact.
