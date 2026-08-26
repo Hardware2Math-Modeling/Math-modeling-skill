@@ -114,8 +114,8 @@ def _validate_manifest(root: Path, errors: list[str]) -> None:
         if not _is_nonempty_string(interface.get(field)):
             errors.append(f"manifest interface.{field} must be a non-empty string")
     capabilities = interface.get("capabilities")
-    if not isinstance(capabilities, list) or not all(isinstance(item, str) for item in capabilities):
-        errors.append("manifest interface.capabilities must be a string array")
+    if not isinstance(capabilities, list) or not capabilities or not all(_is_nonempty_string(item) for item in capabilities):
+        errors.append("manifest interface.capabilities must be a non-empty string array")
     prompts = interface.get("defaultPrompt")
     if not isinstance(prompts, list) or not prompts or not all(_is_nonempty_string(item) for item in prompts):
         errors.append("manifest interface.defaultPrompt must be a non-empty string array")
@@ -156,9 +156,19 @@ def _validate_agent(path: Path, skill: str, errors: list[str]) -> None:
         return
     if _contains_marker(text):
         errors.append(f"{label} contains scaffold marker")
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in text.splitlines():
+        section = re.fullmatch(r"([a-z_]+):\s*", line)
+        if section:
+            current = section.group(1)
+            sections.setdefault(current, [])
+        elif current is not None:
+            sections[current].append(line)
+    interface_lines = "\n".join(sections.get("interface", []))
     fields: dict[str, str] = {}
     for field in ("display_name", "short_description", "default_prompt"):
-        match = re.search(rf'(?m)^{re.escape(field)}:\s*("(?:[^"\\]|\\.)*")\s*$', text)
+        match = re.search(rf'(?m)^  {re.escape(field)}:\s*("(?:[^"\\]|\\.)*")\s*$', interface_lines)
         if not match:
             errors.append(f"{label} requires quoted {field}")
             continue
@@ -169,20 +179,20 @@ def _validate_agent(path: Path, skill: str, errors: list[str]) -> None:
     prompt = fields.get("default_prompt")
     if prompt is not None and f"${skill}" not in prompt:
         errors.append(f"{label} default_prompt must mention ${skill}")
-    if not re.search(r"(?m)^\s*allow_implicit_invocation:\s*true\s*$", text):
+    policy_lines = "\n".join(sections.get("policy", []))
+    if not re.search(r"(?m)^  allow_implicit_invocation:\s*true\s*$", policy_lines):
         errors.append(f"{label} allow_implicit_invocation must be true")
 
 
 def _validate_skills(root: Path, errors: list[str]) -> None:
     skills_root = root / "skills"
+    existing_dirs = sorted((path for path in skills_root.iterdir() if path.is_dir()), key=lambda path: path.name) if skills_root.is_dir() else []
     missing = [skill for skill in ALL_SKILLS if not (skills_root / skill).is_dir()]
     if missing:
         errors.append("missing required skills: " + ", ".join(missing))
     seen_names: dict[str, str] = {}
-    for skill in ALL_SKILLS:
-        skill_dir = skills_root / skill
-        if not skill_dir.is_dir():
-            continue
+    for skill_dir in existing_dirs:
+        skill = skill_dir.name
         skill_path = skill_dir / "SKILL.md"
         label = f"skills/{skill}/SKILL.md"
         text = _read_text(skill_path, errors, label)
@@ -197,12 +207,13 @@ def _validate_skills(root: Path, errors: list[str]) -> None:
                 description = frontmatter.get("description")
                 if not _is_nonempty_string(name) or not SKILL_NAME_RE.fullmatch(name) or len(name) > 64:
                     errors.append(f"{label} frontmatter name must be lower hyphen-case and at most 64 characters")
-                elif name != skill:
-                    errors.append(f"{label} frontmatter name must match directory")
-                elif name in seen_names:
-                    errors.append(f"duplicate skill frontmatter name: {name}")
                 else:
-                    seen_names[name] = skill
+                    if name in seen_names:
+                        errors.append(f"duplicate skill frontmatter name: {name}")
+                    else:
+                        seen_names[name] = skill
+                    if name != skill:
+                        errors.append(f"{label} frontmatter name must match directory")
                 if not _is_nonempty_string(description) or not 1 <= len(description) <= 1024:
                     errors.append(f"{label} frontmatter description must be 1-1024 characters")
             if skill == ORCHESTRATOR_SKILL:
@@ -215,11 +226,12 @@ def _validate_skills(root: Path, errors: list[str]) -> None:
 
 
 def _validate_workflow(root: Path, errors: list[str]) -> None:
-    workflow, raw = _read_json_object(root / "workflow.json", errors, "workflow.json")
+    workflow_path = root / "skills" / ORCHESTRATOR_SKILL / "references" / "workflow.json"
+    workflow, raw = _read_json_object(workflow_path, errors, "skills/math-modeling-orchestrator/references/workflow.json")
     if workflow is None:
         return
     if raw is not None and _contains_marker(raw):
-        errors.append("workflow.json contains scaffold marker")
+        errors.append("workflow contains scaffold marker")
     if workflow.get("schema_version") != "1":
         errors.append('workflow schema_version must be "1"')
     if workflow.get("orchestrator") != ORCHESTRATOR_SKILL:
@@ -264,6 +276,8 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
     if not isinstance(guards, dict):
         errors.append("workflow guards must be an object")
     else:
+        if set(guards) != {"data-analysis-skip", "paper-writing"}:
+            errors.append("workflow guards must contain only data-analysis-skip and paper-writing")
         if guards.get("data-analysis-skip") != {"allowed": True, "requires_reason": True}:
             errors.append("workflow data-analysis-skip guard must require allowed and requires_reason")
         if guards.get("paper-writing") != {"optional": True, "requires_validation_pass": True}:
