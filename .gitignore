@@ -219,3 +219,6 @@ __marimo__/
 
 # Isolated implementation worktrees
 .worktrees/
+
+# Local Codex plugin bundles
+.local-bundles/
