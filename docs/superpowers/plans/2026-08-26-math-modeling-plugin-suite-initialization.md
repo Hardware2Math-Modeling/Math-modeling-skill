@@ -2499,7 +2499,7 @@ Run:
 python3 -m unittest discover -s tests -p 'test_*.py' -v
 ```
 
-Expected: exactly 37 tests PASS (12 validator + 7 repository + 7 bundle + 6 cachebuster + 5 installer).
+Expected: exactly 62 tests PASS (25 validator + 8 repository + 16 bundle + 7 cachebuster + 6 installer).
 
 - [ ] **Step 3: Run source validation and the optional bundled Codex validators**
 
@@ -2560,7 +2560,9 @@ Expected: `math-modeling-suite@math-modeling-local` is installed/listed. Restart
 
 ## Plan self-review record
 
+The complete snippets in Tasks 1-6 record the original RED/GREEN implementation sequence. The final implementation supersedes them where review hardening expanded the contract: validation failure may roll back to problem analysis, data analysis, model construction, or model solving according to the earliest invalidated evidence; the handoff now tracks `validation_status`, `completed_stages`, and `invalidated_stages`; paper writing requires a current validation pass with no invalidated input stage; source and bundle validation reject symlinked metadata, Git submodules, known credential paths, private-key suffixes, unreadable directories, and special files; bundle publication is staged and atomic; and registered-marketplace reinstall verifies an existing bundle at the exact registered path. This is a filename/type archive policy, not a content-level secret scanner. Related regression assertions are consolidated into the 62-test baseline without removing coverage. The Task 7 commands and exact test count below are the authoritative final verification baseline.
+
 - **Spec coverage:** Tasks 1-2 cover manifest, seven skills, registry, handoff, skip/rollback gates, and independent discovery. Tasks 3-5 cover source/bundle separation, safe build, validation, cachebuster, dry-run/apply install, missing CLI behavior, and new-thread guidance. Tasks 6-7 cover architecture, README command consistency, deterministic behavior tests, optional bundled-validator compatibility, and no-push verification.
 - **Placeholder scan:** The plan contains no unfinished scaffold placeholders. Test fixtures intentionally search for the literal marker families through regular expressions rather than embedding unfinished content in generated plugin files.
 - **Type consistency:** `validate_suite(Path) -> list[str]`, `build_bundle(Path, Path) -> Path`, `validate_bundle(Path) -> list[str]`, `update_manifest(Path, str, apply=bool) -> tuple[str, str]`, and `install_local(Path, Path, ...) -> list[list[str]]` are used consistently across production code and tests.
-- **Test count:** Task 7 expects exactly 37 passing tests (12 validator + 7 repository + 7 bundle + 6 cachebuster + 5 installer). If implementation legitimately adds or removes a test, update the documented count in the same commit so the verification claim remains exact.
+- **Test count:** Task 7 expects exactly 62 passing tests (25 validator + 8 repository + 16 bundle + 7 cachebuster + 6 installer). If implementation legitimately adds or removes a test, update the documented count in the same commit so the verification claim remains exact.

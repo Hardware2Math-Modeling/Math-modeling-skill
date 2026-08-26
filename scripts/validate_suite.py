@@ -12,7 +12,9 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Validate a Math Modeling plugin suite.")
     parser.add_argument("root", nargs="?", type=Path, default=Path(__file__).resolve().parents[1])
     args = parser.parse_args()
-    root = args.root.resolve()
+    # Keep the raw path until validate_suite can inspect every component;
+    # resolving here would erase a symlink boundary before it is checked.
+    root = args.root.expanduser()
     errors = validate_suite(root)
     if errors:
         print("Suite validation failed:")

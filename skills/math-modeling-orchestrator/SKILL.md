@@ -31,10 +31,10 @@ After each return, merge the updated handoff without discarding `task.statement`
 
 ## Revision control
 
-Workflow transitions apply only after a stage returns `complete` or `skipped`. A `needs_revision` result never advances to a downstream stage.
+Workflow transitions apply after a stage returns `complete`, or after an optional stage returns `skipped` with its guard and rationale satisfied. A required stage cannot be skipped. A `needs_revision` result never advances to a downstream stage.
 
 - When the failed check belongs to the current stage and its upstream handoff is still valid, record the evidence and retry the current stage.
-- When new evidence invalidates upstream work, roll back to the earliest invalidated upstream stage. Preserve the prior result as audit evidence and mark later completed work as invalidated rather than erasing it.
+- When new evidence invalidates upstream work, roll back to the earliest invalidated upstream stage. Preserve the prior result as audit evidence, move that stage and every affected downstream stage from `state.completed_stages` to `state.invalidated_stages`, and record why rather than erasing them. If an existing validation pass depends on invalidated inputs, set `state.validation_status` to `stale` immediately.
 - After the correction is complete, rerun every invalidated downstream stage in normal workflow order, including validation. A prior validation result cannot authorize paper writing after its inputs have been invalidated.
 
 The stage's `next` fields describe a proposed recovery, not permission to bypass these rules. Pause for genuinely model-changing user input when neither a same-stage retry nor an evidence-backed rollback is possible.
@@ -43,10 +43,12 @@ The stage's `next` fields describe a proposed recovery, not permission to bypass
 
 Validation failure can never route to paper writing. When validation returns `needs_revision`:
 
+- route to problem analysis for misunderstood objectives, constraints, scope, or problem-statement failures;
+- route to data analysis for provenance, leakage, sampling, transformation, data-quality, or data-scope failures;
 - route to model construction for structural, assumption, dimensional, boundary, identifiability, or formulation failures;
 - route to model solving for implementation, parameter, convergence, numerical, or reproducibility failures.
 
-Record the failed checks, rollback decision in `next.rationale`, and any bounded fallback in `next.alternatives` before invoking the selected stage. Do not claim that the full modeling task is complete until validation passes.
+Choose the earliest stage invalidated by the evidence; if the cause is not yet supportable, keep validation at `needs_revision` and pause rather than guessing. Record the failed checks, rollback decision in `next.rationale`, and any bounded fallback in `next.alternatives` before invoking the selected stage. Do not claim that the full modeling task is complete until validation passes.
 
 ## Completion
 

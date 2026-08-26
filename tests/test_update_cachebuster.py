@@ -71,6 +71,36 @@ class CachebusterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "cachebuster token"):
             replace_cachebuster("0.1.0", "../../escape")
 
+    def test_apply_rejects_manifest_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            target = base / "outside.json"
+            manifest = base / "plugin.json"
+            target.write_text('{"version": "0.1.0"}\n', encoding="utf-8")
+            try:
+                manifest.symlink_to(target)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                update_manifest(manifest, "local-test", apply=True)
+
+            parent_target = base / "parent-target"
+            parent_target.mkdir()
+            parent_manifest = parent_target / "plugin.json"
+            parent_manifest.write_text(
+                '{"version": "0.1.0"}\n', encoding="utf-8"
+            )
+            parent_link = base / "parent-link"
+            parent_link.symlink_to(parent_target, target_is_directory=True)
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                update_manifest(parent_link / "plugin.json", "local-test", apply=True)
+
+            self.assertEqual(
+                json.loads(parent_manifest.read_text(encoding="utf-8"))["version"],
+                "0.1.0",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

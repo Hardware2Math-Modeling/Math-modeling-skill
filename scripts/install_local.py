@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import shlex
 import shutil
 import subprocess
@@ -11,11 +12,77 @@ from collections.abc import Callable
 from pathlib import Path
 
 from build_bundle import MARKETPLACE_NAME, build_bundle
-from suite_validation import PLUGIN_NAME
+from suite_validation import (
+    PLUGIN_NAME,
+    ensure_no_symlink_components,
+)
 from validate_bundle import validate_bundle
 
 
 Runner = Callable[..., object]
+MarketplaceReader = Callable[[list[str]], str | bytes]
+
+
+def _default_marketplace_reader(command: list[str]) -> str:
+    try:
+        result = subprocess.run(
+            command,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except (OSError, subprocess.CalledProcessError) as error:
+        raise ValueError(
+            "could not inspect configured Codex marketplaces"
+        ) from error
+    return result.stdout
+
+
+def _require_registered_marketplace(
+    codex_bin: str,
+    bundle_root: Path,
+    reader: MarketplaceReader,
+) -> None:
+    command = [codex_bin, "plugin", "marketplace", "list", "--json"]
+    try:
+        raw = reader(command)
+        if isinstance(raw, bytes):
+            raw = raw.decode("utf-8")
+        payload = json.loads(raw)
+    except (UnicodeDecodeError, TypeError, json.JSONDecodeError, ValueError) as error:
+        if isinstance(error, ValueError) and str(error).startswith("could not inspect"):
+            raise
+        raise ValueError("Codex marketplace list returned invalid JSON") from error
+    if not isinstance(payload, dict) or not isinstance(payload.get("marketplaces"), list):
+        raise ValueError("Codex marketplace list must contain a marketplaces array")
+    matches = [
+        item
+        for item in payload["marketplaces"]
+        if isinstance(item, dict) and item.get("name") == MARKETPLACE_NAME
+    ]
+    if len(matches) != 1:
+        raise ValueError(
+            f"Codex marketplace {MARKETPLACE_NAME} must be registered exactly once"
+        )
+    registered_root = matches[0].get("root")
+    if not isinstance(registered_root, str) or not registered_root:
+        raise ValueError(
+            f"Codex marketplace {MARKETPLACE_NAME} has no usable root"
+        )
+    try:
+        registered_path = ensure_no_symlink_components(
+            Path(registered_root), "registered marketplace root"
+        ).resolve()
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        raise ValueError(
+            f"Codex marketplace {MARKETPLACE_NAME} has an unsafe root"
+        ) from error
+    if registered_path != bundle_root:
+        raise ValueError(
+            f"registered marketplace root {registered_path} does not match "
+            f"bundle {bundle_root}"
+        )
 
 
 def _commands(
@@ -40,10 +107,12 @@ def install_local(
     marketplace_registered: bool = False,
     codex_bin: str | None = None,
     runner: Runner = subprocess.run,
+    marketplace_reader: MarketplaceReader | None = None,
 ) -> list[list[str]]:
     """Build or reuse a valid bundle, then preview or run Codex commands."""
-    source_root = source_root.expanduser().resolve()
-    bundle_root = bundle_root.expanduser().resolve()
+    source_root = ensure_no_symlink_components(source_root, "source root").resolve()
+    bundle_root = ensure_no_symlink_components(bundle_root, "bundle root")
+    bundle_root = bundle_root.resolve()
     resolved_codex = codex_bin or shutil.which("codex")
     if apply and resolved_codex is None:
         raise FileNotFoundError(
@@ -51,13 +120,26 @@ def install_local(
         )
     command_bin = resolved_codex or "codex"
 
-    if bundle_root.is_dir() and any(bundle_root.iterdir()):
+    existing_bundle = bundle_root.is_dir() and any(bundle_root.iterdir())
+    if marketplace_registered and not existing_bundle:
+        raise ValueError(
+            "--marketplace-registered requires an existing non-empty bundle "
+            "path that is already registered"
+        )
+    if existing_bundle:
         errors = validate_bundle(bundle_root)
     else:
         build_bundle(source_root, bundle_root)
         errors = validate_bundle(bundle_root)
     if errors:
         raise ValueError("bundle validation failed:\n- " + "\n- ".join(errors))
+
+    if apply and marketplace_registered:
+        _require_registered_marketplace(
+            command_bin,
+            bundle_root,
+            marketplace_reader or _default_marketplace_reader,
+        )
 
     commands = _commands(
         command_bin,

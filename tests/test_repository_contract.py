@@ -43,10 +43,22 @@ class RepositoryContractTests(unittest.TestCase):
     def test_validation_failure_cannot_route_to_paper_writing(self) -> None:
         workflow = self.load_workflow()
         validation_fail_destinations = workflow["transitions"]["validation-fail"]
-        self.assertNotIn("paper-writing", validation_fail_destinations)
+        self.assertEqual(
+            [
+                "problem-analysis",
+                "data-analysis",
+                "model-construction",
+                "model-solving",
+            ],
+            validation_fail_destinations,
+        )
         self.assertIs(
             True,
             workflow["guards"]["paper-writing"]["requires_validation_pass"],
+        )
+        self.assertIs(
+            True,
+            workflow["guards"]["paper-writing"]["requires_no_invalidated_inputs"],
         )
 
     def test_handoff_contract_uses_canonical_schema_keys(self) -> None:
@@ -90,13 +102,31 @@ class RepositoryContractTests(unittest.TestCase):
     def test_needs_revision_does_not_advance_downstream(self) -> None:
         text = ORCHESTRATOR_PATH.read_text(encoding="utf-8")
         for rule in (
-            "Workflow transitions apply only after a stage returns `complete` or `skipped`.",
+            "Workflow transitions apply after a stage returns `complete`, or after an optional stage returns `skipped` with its guard and rationale satisfied.",
             "A `needs_revision` result never advances to a downstream stage.",
             "retry the current stage",
             "earliest invalidated upstream stage",
             "rerun every invalidated downstream stage",
         ):
             self.assertIn(rule, text)
+
+    def test_handoff_exposes_revision_state_machine_fields(self) -> None:
+        workflow = self.load_workflow()
+        handoff = workflow["handoff"]
+        self.assertEqual(
+            [
+                "current_stage",
+                "status",
+                "validation_status",
+                "completed_stages",
+                "invalidated_stages",
+            ],
+            handoff["state_fields"],
+        )
+        self.assertEqual(
+            ["pending", "pass", "needs_revision", "stale"],
+            handoff["validation_statuses"],
+        )
 
 
 if __name__ == "__main__":

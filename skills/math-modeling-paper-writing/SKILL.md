@@ -9,7 +9,7 @@ Turn validation-passed modeling evidence into the requested deliverable without 
 
 ## Input gate
 
-Accept the current handoff and requested deliverable. When invoked independently, first read [the shared handoff contract](../math-modeling-orchestrator/references/handoff-contract.md) and normalize the handoff. Proceed only if the handoff records an explicit validation pass, unless the request is limited to editing already validated material. If the gate is not satisfied, return `needs_revision` and identify the missing validation evidence.
+Accept the current handoff and requested deliverable. When invoked independently, first read [the shared handoff contract](../math-modeling-orchestrator/references/handoff-contract.md) and normalize the handoff. Proceed only when `state.validation_status` is `pass`, no input stage from problem analysis through validation remains in `state.invalidated_stages`, and the requested claims remain within that current evidence. Paper writing itself may remain invalidated while this stage regenerates it. Editing an existing deliverable does not bypass this gate. If it is not satisfied, return `needs_revision` and identify the missing or stale validation evidence.
 
 ## Responsibilities
 

@@ -18,7 +18,7 @@ Accept the current handoff with an accepted model, defined interfaces, parameter
 - Preserve relative paths and exact commands for inputs, code, logs, tables, figures, and result artifacts. Record failed or unstable runs as well as successful ones.
 - Check convergence, constraint feasibility, stability, and basic sanity against known boundaries, units, conservation relationships, or limiting cases.
 - Keep scientific parameters tied to their stated evidence. Do not repurpose them as numerical tuning knobs; label solver controls separately.
-- If execution exposes a structural or assumption defect, return `needs_revision` with the evidence and recommend model construction. If the problem is implementation, parameters, initialization, convergence, or reproducibility, identify that narrower solving revision.
+- If execution exposes a structural or assumption defect, return `needs_revision` with the evidence and recommend model construction. If the problem is implementation, parameters, initialization, convergence, or reproducibility, return `needs_revision` and identify that narrower solving revision. Any unmet or unevidenced prespecified convergence, feasibility, stability, sanity, or acceptable-solution condition requires `needs_revision`; failed exploratory runs may coexist with `complete` only when a final accepted run meets every required condition and all failures remain recorded.
 
 ## Boundaries
 

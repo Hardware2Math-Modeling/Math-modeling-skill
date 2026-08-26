@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
-from pathlib import Path
+import stat
+from pathlib import Path, PurePosixPath
 from typing import Any
+from urllib.parse import urlparse
 
 
 PLUGIN_NAME = "math-modeling-suite"
@@ -21,11 +24,23 @@ STAGE_SKILLS = (
 ALL_SKILLS = (ORCHESTRATOR_SKILL, *STAGE_SKILLS)
 HANDOFF_REQUIRED_FIELDS = ("schema_version", "state", "result", "next")
 HANDOFF_STATUSES = ("pending", "in_progress", "complete", "needs_revision", "skipped")
+HANDOFF_STATE_FIELDS = (
+    "current_stage",
+    "status",
+    "validation_status",
+    "completed_stages",
+    "invalidated_stages",
+)
+HANDOFF_VALIDATION_STATUSES = ("pending", "pass", "needs_revision", "stale")
 HANDOFF_CANONICAL_PATHS = (
     ("task", "statement"),
     ("task", "objectives"),
     ("task", "constraints"),
     ("state", "current_stage"),
+    ("state", "status"),
+    ("state", "validation_status"),
+    ("state", "completed_stages"),
+    ("state", "invalidated_stages"),
     ("quality", "warnings"),
     ("quality", "confidence"),
     ("next", "rationale"),
@@ -39,22 +54,111 @@ SEMVER_RE = re.compile(
 )
 SKILL_NAME_RE = re.compile(r"^[a-z](?:[a-z0-9]*(?:-[a-z0-9]+)*)?$")
 SCAFFOLD_RE = re.compile(r"\[(?:TODO|TBD):", re.IGNORECASE)
+HEX_COLOR_RE = re.compile(r"^#[0-9A-F]{6}$", re.IGNORECASE)
+
+ARCHIVE_IGNORED_NAMES = {
+    ".DS_Store",
+    ".git",
+    ".local-bundles",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".venv",
+    ".worktrees",
+    "__pycache__",
+}
+
+# macOS exposes these stable aliases for temporary paths. They are safe to
+# normalize, while user-controlled symlink components remain rejected.
+_SAFE_SYSTEM_ALIASES = {
+    Path("/tmp"): Path("/private/tmp"),
+    Path("/var"): Path("/private/var"),
+}
+
+SENSITIVE_ENV_NAMES = {".env", ".envrc"}
+SENSITIVE_FILE_NAMES = {
+    "credentials",
+    "credential",
+    "credentials.json",
+    "credential.json",
+    "secrets",
+    "secret",
+    "secrets.json",
+    "secret.json",
+    "token",
+    "tokens",
+    "token.json",
+    "tokens.json",
+    "api_key",
+    "api-key",
+    "apikey",
+    "id_rsa",
+    "id_dsa",
+    "id_ecdsa",
+    "id_ed25519",
+}
+SENSITIVE_FILE_SUFFIXES = (
+    ".pem",
+    ".key",
+    ".p12",
+    ".pfx",
+    ".jks",
+    ".keystore",
+)
 
 _MANIFEST_KEYS = {
     "id", "name", "version", "description", "author", "homepage", "repository",
     "license", "keywords", "skills", "interface",
 }
+_AUTHOR_KEYS = {"name", "email", "url"}
+_SKILL_FRONTMATTER_KEYS = {"name", "description"}
 _INTERFACE_STRING_FIELDS = (
     "displayName", "shortDescription", "longDescription", "developerName", "category",
 )
+_INTERFACE_KEYS = {
+    *_INTERFACE_STRING_FIELDS,
+    "capabilities",
+    "defaultPrompt",
+    "default_prompt",
+    "websiteURL",
+    "privacyPolicyURL",
+    "termsOfServiceURL",
+    "brandColor",
+    "composerIcon",
+    "logo",
+    "logoDark",
+    "screenshots",
+}
 _EXPECTED_TRANSITIONS = {
     "problem-analysis": ["data-analysis", "model-construction"],
     "data-analysis": ["model-construction"],
     "model-construction": ["model-solving"],
     "model-solving": ["validation"],
     "validation-pass": ["paper-writing", "complete"],
-    "validation-fail": ["model-construction", "model-solving"],
+    "validation-fail": [
+        "problem-analysis",
+        "data-analysis",
+        "model-construction",
+        "model-solving",
+    ],
     "paper-writing": ["complete"],
+}
+
+_WORKFLOW_KEYS = {
+    "schema_version",
+    "orchestrator",
+    "stages",
+    "transitions",
+    "guards",
+    "handoff",
+}
+_WORKFLOW_STAGE_KEYS = {"id", "skill", "optional"}
+_WORKFLOW_GUARD_KEYS = {"data-analysis-skip", "paper-writing"}
+_WORKFLOW_HANDOFF_KEYS = {
+    "required_fields",
+    "statuses",
+    "state_fields",
+    "validation_statuses",
 }
 
 
@@ -64,9 +168,20 @@ def _contains_marker(text: str) -> bool:
 
 def _read_text(path: Path, errors: list[str], label: str) -> str | None:
     try:
-        return path.read_text(encoding="utf-8")
-    except (OSError, ValueError):
+        safe_path = ensure_no_symlink_components(path, label)
+        if not stat.S_ISREG(safe_path.lstat().st_mode):
+            errors.append(f"{label} must be a regular file")
+            return None
+        return safe_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
         errors.append(f"missing {label}")
+    except ValueError as error:
+        if "symbolic link" in str(error):
+            errors.append(f"{label} must not use symbolic links")
+        else:
+            errors.append(f"missing {label}")
+    except OSError:
+        errors.append(f"unreadable {label}")
     except UnicodeDecodeError:
         errors.append(f"unreadable {label}")
     return None
@@ -91,6 +206,123 @@ def _is_nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
 
 
+def _lexical_absolute(path: Path) -> Path:
+    """Return an absolute path without dereferencing symlinks."""
+    expanded = os.path.expanduser(os.fspath(path))
+    if not os.path.isabs(expanded):
+        expanded = os.path.join(os.getcwd(), expanded)
+    # Do not call abspath/normpath here: collapsing ``..`` before checking
+    # components would let a symlinked ancestor disappear from the audit.
+    return Path(expanded)
+
+
+def _is_safe_system_alias(path: Path) -> bool:
+    """Allow only known OS aliases that are outside user-controlled roots."""
+    expected = _SAFE_SYSTEM_ALIASES.get(path)
+    if expected is None:
+        return False
+    try:
+        return path.resolve(strict=True) == expected
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+def ensure_no_symlink_components(path: Path, label: str) -> Path:
+    """Reject symlink components in an input path before it is resolved.
+
+    Nonexistent trailing components are allowed so callers can create a new
+    output directory. Existing components are inspected with ``lstat`` and
+    failures are treated as unsafe rather than silently followed.
+    """
+    lexical = _lexical_absolute(path)
+    absolute = Path(os.path.normpath(os.fspath(lexical)))
+    current = Path(lexical.anchor) if lexical.anchor else Path()
+    parts = lexical.parts[1:] if lexical.anchor else lexical.parts
+    for part in parts:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            current = current.parent
+            continue
+        current = current / part
+        try:
+            mode = current.lstat().st_mode
+        except FileNotFoundError:
+            # No later component can exist through a missing path component.
+            break
+        except OSError as error:
+            raise ValueError(
+                f"{label} path component cannot be inspected: {current}"
+            ) from error
+        if stat.S_ISLNK(mode) and not _is_safe_system_alias(current):
+            if current == absolute:
+                raise ValueError(f"{label} must not be a symbolic link: {current}")
+            raise ValueError(f"{label} must not contain a symbolic link: {current}")
+    return absolute
+
+
+def is_sensitive_relative_path(path: Path) -> bool:
+    """Return whether a relative archive path resembles credential material."""
+    for component in path.parts:
+        name = component.casefold()
+        if name in SENSITIVE_ENV_NAMES or name.startswith(".env."):
+            return True
+        if name in SENSITIVE_FILE_NAMES or name.endswith(SENSITIVE_FILE_SUFFIXES):
+            return True
+    return False
+
+
+def is_ignored_relative_path(path: Path) -> bool:
+    """Return whether a path is repository metadata or generated cache output."""
+    return any(
+        component in ARCHIVE_IGNORED_NAMES
+        or component.endswith((".pyc", ".pyo"))
+        for component in path.parts
+    )
+
+
+def _is_absolute_https_url(value: Any) -> bool:
+    if not isinstance(value, str):
+        return False
+    parsed = urlparse(value)
+    return parsed.scheme == "https" and bool(parsed.netloc)
+
+
+def _validate_asset_path(
+    root: Path, raw_path: Any, label: str, errors: list[str]
+) -> None:
+    if not _is_nonempty_string(raw_path):
+        errors.append(f"{label} must be a non-empty relative path")
+        return
+    candidate = PurePosixPath(raw_path.replace("\\", "/"))
+    if candidate.is_absolute() or any(
+        part in {"", ".", ".."} for part in candidate.parts
+    ):
+        errors.append(f"{label} must stay inside the plugin root")
+        return
+    try:
+        asset_path = ensure_no_symlink_components(
+            root / candidate.as_posix(), label
+        )
+        resolved = asset_path.resolve()
+        resolved.relative_to(root.resolve())
+    except ValueError as error:
+        if "symbolic link" in str(error):
+            errors.append(f"{label} must not use symbolic links")
+        else:
+            errors.append(f"{label} must stay inside the plugin root")
+        return
+    except (OSError, RuntimeError):
+        errors.append(f"{label} must stay inside the plugin root")
+        return
+    try:
+        is_regular = stat.S_ISREG(asset_path.lstat().st_mode)
+    except OSError:
+        is_regular = False
+    if not is_regular:
+        errors.append(f"{label} points to a missing file")
+
+
 def _validate_manifest(root: Path, errors: list[str]) -> None:
     path = root / ".codex-plugin" / "plugin.json"
     manifest, raw = _read_json_object(path, errors, ".codex-plugin/plugin.json")
@@ -106,6 +338,21 @@ def _validate_manifest(root: Path, errors: list[str]) -> None:
         errors.append("manifest must not declare " + ", ".join(forbidden))
     if manifest.get("name") != PLUGIN_NAME:
         errors.append(f"manifest name must be {PLUGIN_NAME}")
+    if "id" in manifest and not _is_nonempty_string(manifest.get("id")):
+        errors.append("manifest id must be a non-empty string when present")
+    for field in ("homepage", "repository", "license"):
+        if field in manifest and not _is_nonempty_string(manifest.get(field)):
+            errors.append(f"manifest {field} must be a non-empty string when present")
+    if "keywords" in manifest:
+        keywords = manifest.get("keywords")
+        if (
+            not isinstance(keywords, list)
+            or not keywords
+            or not all(_is_nonempty_string(item) for item in keywords)
+        ):
+            errors.append(
+                "manifest keywords must be a non-empty string array when present"
+            )
     version = manifest.get("version")
     if not isinstance(version, str) or not SEMVER_RE.fullmatch(version):
         errors.append("manifest version must be strict SemVer")
@@ -116,21 +363,90 @@ def _validate_manifest(root: Path, errors: list[str]) -> None:
     author = manifest.get("author")
     if not isinstance(author, dict) or not _is_nonempty_string(author.get("name")):
         errors.append("manifest author.name must be a non-empty string")
+    if isinstance(author, dict):
+        unexpected_author = sorted(set(author) - _AUTHOR_KEYS)
+        if unexpected_author:
+            errors.append(
+                "manifest author contains unsupported keys: "
+                + ", ".join(unexpected_author)
+            )
+        for field in ("email", "url"):
+            if field in author and not _is_nonempty_string(author.get(field)):
+                errors.append(
+                    f"manifest author.{field} must be a non-empty string when present"
+                )
+        if "url" in author and not _is_absolute_https_url(author.get("url")):
+            errors.append("manifest author.url must be an absolute https URL")
     interface = manifest.get("interface")
     if not isinstance(interface, dict):
         errors.append("manifest interface must be an object")
         return
+    unexpected_interface = sorted(set(interface) - _INTERFACE_KEYS)
+    if unexpected_interface:
+        errors.append(
+            "manifest interface contains unsupported keys: "
+            + ", ".join(unexpected_interface)
+        )
     for field in _INTERFACE_STRING_FIELDS:
         if not _is_nonempty_string(interface.get(field)):
             errors.append(f"manifest interface.{field} must be a non-empty string")
     capabilities = interface.get("capabilities")
     if not isinstance(capabilities, list) or not capabilities or not all(_is_nonempty_string(item) for item in capabilities):
         errors.append("manifest interface.capabilities must be a non-empty string array")
-    prompts = interface.get("defaultPrompt")
+    prompts = interface.get("defaultPrompt", interface.get("default_prompt"))
     if not isinstance(prompts, list) or not prompts or not all(_is_nonempty_string(item) for item in prompts):
-        errors.append("manifest interface.defaultPrompt must be a non-empty string array")
+        errors.append(
+            "manifest interface.defaultPrompt must be a non-empty string array"
+        )
     elif not any(f"${ORCHESTRATOR_SKILL}" in prompt for prompt in prompts):
         errors.append(f"manifest interface.defaultPrompt must mention ${ORCHESTRATOR_SKILL}")
+    for field in (
+        "websiteURL",
+        "privacyPolicyURL",
+        "termsOfServiceURL",
+        "brandColor",
+        "composerIcon",
+        "logo",
+        "logoDark",
+    ):
+        if field in interface and not _is_nonempty_string(interface.get(field)):
+            errors.append(
+                f"manifest interface.{field} must be a non-empty string when present"
+            )
+    for field in ("websiteURL", "privacyPolicyURL", "termsOfServiceURL"):
+        if field in interface and not _is_absolute_https_url(interface.get(field)):
+            errors.append(
+                f"manifest interface.{field} must be an absolute https URL"
+            )
+    if "brandColor" in interface and (
+        not isinstance(interface.get("brandColor"), str)
+        or HEX_COLOR_RE.fullmatch(interface["brandColor"]) is None
+    ):
+        errors.append("manifest interface.brandColor must use #RRGGBB")
+    for field in ("composerIcon", "logo", "logoDark"):
+        if field in interface:
+            _validate_asset_path(
+                root,
+                interface.get(field),
+                f"manifest interface.{field}",
+                errors,
+            )
+    if "screenshots" in interface:
+        screenshots = interface.get("screenshots")
+        if not isinstance(screenshots, list) or not all(
+            _is_nonempty_string(item) for item in screenshots
+        ):
+            errors.append(
+                "manifest interface.screenshots must be a string array when present"
+            )
+        if isinstance(screenshots, list):
+            for index, raw_path in enumerate(screenshots):
+                _validate_asset_path(
+                    root,
+                    raw_path,
+                    f"manifest interface.screenshots[{index}]",
+                    errors,
+                )
 
 
 def _parse_scalar(value: str, *, quoted_only: bool = False) -> str | None:
@@ -147,7 +463,7 @@ def _parse_scalar(value: str, *, quoted_only: bool = False) -> str | None:
             return None
         return decoded if isinstance(decoded, str) else None
     if value.startswith("'"):
-        if len(value) < 2 or not value.endswith("'"):
+        if re.fullmatch(r"'(?:[^']|'')*'", value) is None:
             return None
         return value[1:-1].replace("''", "'")
     if quoted_only:
@@ -158,15 +474,17 @@ def _parse_scalar(value: str, *, quoted_only: bool = False) -> str | None:
         return None
     if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", value):
         return None
+    if re.search(r":(?:[ \t]|$)|(?:^|[ \t])#", value):
+        return None
     return value
 
 
 def _parse_frontmatter(text: str) -> dict[str, str] | None:
     lines = text.splitlines()
-    if not lines or lines[0].strip() != "---":
+    if not lines or lines[0] != "---":
         return None
     try:
-        closing = next(index for index, line in enumerate(lines[1:], 1) if line.strip() == "---")
+        closing = next(index for index, line in enumerate(lines[1:], 1) if line == "---")
     except StopIteration:
         return None
     values: dict[str, str] = {}
@@ -301,6 +619,14 @@ def _validate_skills(root: Path, errors: list[str]) -> None:
             if frontmatter is None:
                 errors.append(f"{label} has invalid frontmatter")
             else:
+                unexpected_frontmatter = sorted(
+                    set(frontmatter) - _SKILL_FRONTMATTER_KEYS
+                )
+                if unexpected_frontmatter:
+                    errors.append(
+                        f"{label} unsupported frontmatter keys: "
+                        + ", ".join(unexpected_frontmatter)
+                    )
                 name = frontmatter.get("name")
                 description = frontmatter.get("description")
                 if not _is_nonempty_string(name) or not SKILL_NAME_RE.fullmatch(name) or len(name) > 64:
@@ -318,6 +644,10 @@ def _validate_skills(root: Path, errors: list[str]) -> None:
                     errors.append(
                         f"{label} frontmatter description must start with 'Use when'"
                     )
+                elif "<" in description or ">" in description:
+                    errors.append(
+                        f"{label} frontmatter description must not contain angle brackets"
+                    )
             if skill == ORCHESTRATOR_SKILL:
                 for stage in STAGE_SKILLS:
                     if stage not in text:
@@ -334,6 +664,14 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
         return
     if raw is not None and _contains_marker(raw):
         errors.append("workflow contains scaffold marker")
+    unexpected_workflow = sorted(set(workflow) - _WORKFLOW_KEYS)
+    missing_workflow = sorted(_WORKFLOW_KEYS - set(workflow))
+    if unexpected_workflow:
+        errors.append(
+            "workflow contains unsupported keys: " + ", ".join(unexpected_workflow)
+        )
+    if missing_workflow:
+        errors.append("workflow is missing keys: " + ", ".join(missing_workflow))
     if workflow.get("schema_version") != "1":
         errors.append('workflow schema_version must be "1"')
     if workflow.get("orchestrator") != ORCHESTRATOR_SKILL:
@@ -348,6 +686,18 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
         elif registered != list(STAGE_SKILLS):
             errors.append("workflow stages must register required skills in order")
         for stage in stages:
+            if not isinstance(stage, dict):
+                continue
+            unexpected_stage = sorted(set(stage) - _WORKFLOW_STAGE_KEYS)
+            missing_stage = sorted(_WORKFLOW_STAGE_KEYS - set(stage))
+            if unexpected_stage:
+                errors.append(
+                    "workflow stage entries must contain only id, skill, optional"
+                )
+            if missing_stage:
+                errors.append(
+                    "workflow stage entries are missing: " + ", ".join(missing_stage)
+                )
             skill = stage.get("skill")
             if isinstance(skill, str) and skill not in ALL_SKILLS:
                 errors.append(f"workflow stage references unknown skill: {skill}")
@@ -375,6 +725,10 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
                     errors.append(
                         f"workflow stage {skill} optional must be {expected_word}"
                     )
+            if not isinstance(stage.get("id"), str):
+                errors.append("workflow stage id must be a string")
+            if type(stage.get("optional")) is not bool:
+                errors.append("workflow stage optional must be a boolean")
 
     transitions = workflow.get("transitions")
     if not isinstance(transitions, dict):
@@ -384,9 +738,19 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
             errors.append("workflow transitions must define the required routes")
         for source, expected in _EXPECTED_TRANSITIONS.items():
             actual = transitions.get(source)
+            if source in transitions and (
+                not isinstance(actual, list)
+                or not all(isinstance(destination, str) for destination in actual)
+            ):
+                errors.append(
+                    f"workflow transition {source} must be a string array"
+                )
+                continue
             if source == "validation-fail":
                 if actual != expected:
-                    errors.append("workflow validation-fail must route only to model-construction or model-solving")
+                    errors.append(
+                        "workflow validation-fail must route only to upstream modeling stages"
+                    )
             elif actual != expected:
                 errors.append(f"workflow transition {source} must be {expected}")
 
@@ -396,19 +760,69 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
     else:
         if set(guards) != {"data-analysis-skip", "paper-writing"}:
             errors.append("workflow guards must contain only data-analysis-skip and paper-writing")
+        for guard_name, expected_guard in (
+            (
+                "data-analysis-skip",
+                {"allowed": True, "requires_reason": True},
+            ),
+            (
+                "paper-writing",
+                {
+                    "optional": True,
+                    "requires_validation_pass": True,
+                    "requires_no_invalidated_inputs": True,
+                },
+            ),
+        ):
+            guard = guards.get(guard_name)
+            if not isinstance(guard, dict):
+                errors.append(f"workflow guard {guard_name} must be an object")
+                continue
+            unexpected_guard = sorted(set(guard) - set(expected_guard))
+            if unexpected_guard:
+                errors.append(
+                    f"workflow guard {guard_name} contains unsupported keys: "
+                    + ", ".join(unexpected_guard)
+                )
         if guards.get("data-analysis-skip") != {"allowed": True, "requires_reason": True}:
             errors.append("workflow data-analysis-skip guard must require allowed and requires_reason")
-        if guards.get("paper-writing") != {"optional": True, "requires_validation_pass": True}:
-            errors.append("workflow paper-writing guard must require optional and requires_validation_pass")
+        if guards.get("paper-writing") != {
+            "optional": True,
+            "requires_validation_pass": True,
+            "requires_no_invalidated_inputs": True,
+        }:
+            errors.append(
+                "workflow paper-writing guard must require a current validation pass "
+                "and no invalidated inputs"
+            )
 
     handoff = workflow.get("handoff")
     if not isinstance(handoff, dict):
         errors.append("workflow handoff must be an object")
     else:
+        unexpected_handoff = sorted(set(handoff) - _WORKFLOW_HANDOFF_KEYS)
+        missing_handoff = sorted(_WORKFLOW_HANDOFF_KEYS - set(handoff))
+        if unexpected_handoff:
+            errors.append(
+                "workflow handoff contains unsupported keys: "
+                + ", ".join(unexpected_handoff)
+            )
+        if missing_handoff:
+            errors.append(
+                "workflow handoff is missing keys: " + ", ".join(missing_handoff)
+            )
         if handoff.get("required_fields") != list(HANDOFF_REQUIRED_FIELDS):
             errors.append("workflow handoff.required_fields must match required contract fields")
         if handoff.get("statuses") != list(HANDOFF_STATUSES):
             errors.append("workflow handoff.statuses must match required statuses")
+        if handoff.get("state_fields") != list(HANDOFF_STATE_FIELDS):
+            errors.append(
+                "workflow handoff.state_fields must match required state fields"
+            )
+        if handoff.get("validation_statuses") != list(HANDOFF_VALIDATION_STATUSES):
+            errors.append(
+                "workflow handoff.validation_statuses must match required validation statuses"
+            )
 
     contract_path = root / "skills" / ORCHESTRATOR_SKILL / "references" / "handoff-contract.md"
     contract = _read_text(contract_path, errors, "skills/math-modeling-orchestrator/references/handoff-contract.md")
@@ -431,8 +845,12 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
 def validate_suite(root: Path) -> list[str]:
     """Return deterministic, human-readable contract errors for a suite root."""
     try:
-        root = Path(root).expanduser().resolve()
-    except (OSError, RuntimeError, TypeError, ValueError):
+        root = ensure_no_symlink_components(Path(root), "suite root").resolve()
+    except ValueError as error:
+        if "symbolic link" in str(error):
+            return [str(error)]
+        return ["suite root must be a valid path"]
+    except (OSError, RuntimeError, TypeError):
         return ["suite root must be a valid path"]
     errors: list[str] = []
     _validate_manifest(root, errors)

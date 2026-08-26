@@ -5,11 +5,64 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
+import stat
 from pathlib import Path
 from typing import Any
 
 from build_bundle import MARKETPLACE_DISPLAY_NAME, MARKETPLACE_NAME
-from suite_validation import PLUGIN_NAME, validate_suite
+from suite_validation import (
+    PLUGIN_NAME,
+    ensure_no_symlink_components,
+    is_ignored_relative_path,
+    is_sensitive_relative_path,
+    validate_suite,
+)
+
+
+_MARKETPLACE_KEYS = {"name", "interface", "plugins"}
+_MARKETPLACE_INTERFACE_KEYS = {"displayName"}
+_MARKETPLACE_PLUGIN_KEYS = {"name", "source", "policy", "category"}
+_MARKETPLACE_SOURCE_KEYS = {"source", "path"}
+_MARKETPLACE_POLICY_KEYS = {"installation", "authentication"}
+
+
+class _BundleScanError(Exception):
+    """Raised when a bundle directory cannot be inspected safely."""
+
+
+def _tree_policy_errors(root: Path) -> tuple[str, ...]:
+    """Inspect every archive entry without following links or special nodes."""
+    found: list[str] = []
+    pending: list[tuple[Path, Path]] = [(root, Path())]
+    while pending:
+        directory, relative_directory = pending.pop()
+        try:
+            with os.scandir(directory) as scan:
+                entries = sorted(scan, key=lambda entry: entry.name, reverse=True)
+        except OSError as error:
+            label = relative_directory.as_posix() or "."
+            raise _BundleScanError(label) from error
+        for entry in entries:
+            relative_path = relative_directory / entry.name
+            relative_label = relative_path.as_posix()
+            if is_ignored_relative_path(relative_path):
+                found.append(f"bundle contains forbidden path: {relative_label}")
+            if is_sensitive_relative_path(relative_path):
+                found.append(f"bundle contains sensitive file: {relative_label}")
+            try:
+                mode = entry.stat(follow_symlinks=False).st_mode
+            except OSError as error:
+                raise _BundleScanError(relative_label) from error
+            if stat.S_ISLNK(mode):
+                found.append(f"bundle contains symbolic link: {relative_label}")
+            elif stat.S_ISDIR(mode):
+                pending.append((Path(entry.path), relative_path))
+            elif not stat.S_ISREG(mode):
+                found.append(
+                    f"bundle contains unsupported file type: {relative_label}"
+                )
+    return tuple(sorted(found))
 
 
 def _load_marketplace(path: Path, errors: list[str]) -> dict[str, Any] | None:
@@ -50,10 +103,22 @@ def _resolve_plugin_root(
         return None
 
     entry = matches[0]
+    unexpected_entry = sorted(set(entry) - _MARKETPLACE_PLUGIN_KEYS)
+    if unexpected_entry:
+        errors.append(
+            "marketplace plugin contains unsupported keys: "
+            + ", ".join(unexpected_entry)
+        )
     source = entry.get("source")
     if not isinstance(source, dict) or source.get("source") != "local":
         errors.append("marketplace plugin source must be local")
         return None
+    unexpected_source = sorted(set(source) - _MARKETPLACE_SOURCE_KEYS)
+    if unexpected_source:
+        errors.append(
+            "marketplace source contains unsupported keys: "
+            + ", ".join(unexpected_source)
+        )
     raw_path = source.get("path")
     if not isinstance(raw_path, str) or not raw_path:
         errors.append("marketplace source.path must be a non-empty string")
@@ -83,6 +148,14 @@ def _resolve_plugin_root(
         "installation": "AVAILABLE",
         "authentication": "ON_INSTALL",
     }
+    policy = entry.get("policy")
+    if isinstance(policy, dict):
+        unexpected_policy = sorted(set(policy) - _MARKETPLACE_POLICY_KEYS)
+        if unexpected_policy:
+            errors.append(
+                "marketplace policy contains unsupported keys: "
+                + ", ".join(unexpected_policy)
+            )
     if entry.get("policy") != expected_policy:
         errors.append("marketplace plugin policy must use AVAILABLE and ON_INSTALL")
     if entry.get("category") != "Education & Research":
@@ -93,18 +166,44 @@ def _resolve_plugin_root(
 def validate_bundle(bundle_root: Path) -> list[str]:
     """Return deterministic validation errors for a marketplace bundle."""
     try:
-        bundle_root = Path(bundle_root).expanduser().resolve()
-    except (OSError, RuntimeError, ValueError):
+        bundle_root = ensure_no_symlink_components(bundle_root, "bundle root").resolve()
+    except ValueError as error:
+        if "symbolic link" in str(error):
+            return [str(error)]
+        return ["bundle root must be a valid path"]
+    except (OSError, RuntimeError, TypeError):
         return ["bundle root must be a valid path"]
     errors: list[str] = []
+    if bundle_root.is_dir():
+        try:
+            tree_errors = _tree_policy_errors(bundle_root)
+        except _BundleScanError as error:
+            return [f"bundle directory could not be inspected: {error}"]
+        if tree_errors:
+            errors.extend(tree_errors)
+            return errors
     marketplace = _load_marketplace(
         bundle_root / ".agents" / "plugins" / "marketplace.json", errors
     )
     if marketplace is None:
         return errors
+    unexpected_marketplace = sorted(set(marketplace) - _MARKETPLACE_KEYS)
+    if unexpected_marketplace:
+        errors.append(
+            "marketplace contains unsupported keys: "
+            + ", ".join(unexpected_marketplace)
+        )
     if marketplace.get("name") != MARKETPLACE_NAME:
         errors.append(f"marketplace name must be {MARKETPLACE_NAME}")
-    if marketplace.get("interface") != {"displayName": MARKETPLACE_DISPLAY_NAME}:
+    interface = marketplace.get("interface")
+    if isinstance(interface, dict):
+        unexpected_interface = sorted(set(interface) - _MARKETPLACE_INTERFACE_KEYS)
+        if unexpected_interface:
+            errors.append(
+                "marketplace interface contains unsupported keys: "
+                + ", ".join(unexpected_interface)
+            )
+    if interface != {"displayName": MARKETPLACE_DISPLAY_NAME}:
         errors.append(
             f"marketplace interface.displayName must be {MARKETPLACE_DISPLAY_NAME}"
         )
@@ -126,7 +225,9 @@ def parse_args() -> argparse.Namespace:
 
 
 def main() -> None:
-    bundle_root = Path(parse_args().bundle).expanduser().resolve()
+    # Keep the raw path here so validate_bundle can reject a symlink root before
+    # path resolution erases the boundary that must be checked.
+    bundle_root = Path(parse_args().bundle).expanduser()
     errors = validate_bundle(bundle_root)
     if errors:
         print("Bundle validation failed:")

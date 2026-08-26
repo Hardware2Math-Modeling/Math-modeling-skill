@@ -13,7 +13,7 @@ math-modeling-orchestrator
   -> math-modeling-model-construction
   -> math-modeling-model-solving
   -> math-modeling-validation
-       -> model construction/solving   (failed validation)
+       -> earliest affected upstream stage (failed validation)
        -> math-modeling-paper-writing   (optional, passed validation)
 ```
 
@@ -56,7 +56,9 @@ The bundle contains:
   plugins/math-modeling-suite/
 ```
 
-The builder refuses to overwrite a non-empty directory or write inside the source tree. It excludes Git metadata, isolated worktrees, generated local bundles, bytecode, and common caches.
+The builder refuses to overwrite a non-empty directory or write inside the source tree. It assembles the bundle in a temporary sibling and atomically publishes it, so a failed copy does not leave a partial destination. In a Git worktree it selects tracked files plus non-ignored untracked files; both Git and non-Git sources then exclude `.env`, `.envrc`, `.env.*`, Git metadata, isolated worktrees, generated local bundles, bytecode, and common caches. Included source symlinks, bundle symlinks, symlinked path components, special filesystem nodes, Git submodules, known credential filenames such as `credentials.json`, and private-key suffixes such as `.pem` and `.key` are rejected.
+
+The same archive-tree policy is applied when an existing bundle is validated or reused; injected Git metadata and generated cache paths are rejected too. This is a conservative filename/type boundary, not a general content-level secret scanner: review the distribution contents and never keep credentials under ordinary-looking filenames in the plugin source.
 
 ## Preview and install locally
 
@@ -79,6 +81,8 @@ This runs:
 codex plugin marketplace add "$bundle_root"
 codex plugin add math-modeling-suite@math-modeling-local
 ```
+
+`--apply` invokes those two Codex operations sequentially. If the plugin-add operation fails after marketplace registration succeeds, inspect `codex plugin marketplace list --json`; retry with `--marketplace-registered` when the exact bundle is registered, or remove that marketplace explicitly only when you intentionally created it (`codex plugin marketplace remove math-modeling-local`).
 
 Restart Codex if it is open, then use a new thread so the installed skill set is loaded cleanly.
 
@@ -138,7 +142,9 @@ Stable releases use SemVer. Local iterations replace only the `+codex.local-<UTC
 
 - Validation, tests, bundle creation, and installer dry runs do not modify Codex configuration.
 - `install_local.py` requires `--apply` before it runs external Codex commands.
+- With `--marketplace-registered --apply`, the installer verifies that Codex registers `math-modeling-local` at the exact resolved bundle path before reinstalling.
 - `update_cachebuster.py` requires `--apply` before it edits the plugin manifest.
+- Source and bundle validation fail closed on symlinked metadata, unreadable directories, known credential filenames, private-key suffixes, and non-regular filesystem entries. The filename policy does not inspect file contents for arbitrary secrets.
 - The plugin does not install solver runtimes, TeX, Python packages, MCP servers, or credentials.
 - Failed model validation cannot route to paper writing.
 

@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -35,10 +37,7 @@ class BundleTests(unittest.TestCase):
             output = base / "bundle"
             source.mkdir()
             make_valid_suite(source)
-            (source / ".git").mkdir()
-            (source / ".git" / "HEAD").write_text(
-                "ref: refs/heads/main\n", encoding="utf-8"
-            )
+            run_git(source, "init", "--quiet")
             (source / ".worktrees" / "other").mkdir(parents=True)
             (source / ".worktrees" / "other" / "owned.txt").write_text(
                 "do not bundle\n", encoding="utf-8"
@@ -102,6 +101,90 @@ class BundleTests(unittest.TestCase):
                 ),
                 "tracked\n",
             )
+
+            with patch(
+                "build_bundle.subprocess.run",
+                side_effect=OSError("git unavailable"),
+            ):
+                with self.assertRaisesRegex(
+                    ValueError, "Git source inspection failed"
+                ):
+                    build_bundle(source, output.parent / "failed-bundle")
+
+            submodule_source = base / "submodule-source"
+            submodule_output = base / "submodule-bundle"
+            submodule_source.mkdir()
+            make_valid_suite(submodule_source)
+            run_git(submodule_source, "init", "--quiet")
+            run_git(submodule_source, "add", ".")
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(submodule_source),
+                    "-c",
+                    "user.name=Fixture",
+                    "-c",
+                    "user.email=fixture@example.invalid",
+                    "commit",
+                    "--quiet",
+                    "-m",
+                    "fixture",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            object_id = subprocess.run(
+                ["git", "-C", str(submodule_source), "rev-parse", "HEAD"],
+                check=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            ).stdout.strip()
+            (submodule_source / "vendor").mkdir()
+            (submodule_source / "vendor" / "required-guide.md").write_text(
+                "required\n", encoding="utf-8"
+            )
+            run_git(
+                submodule_source,
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                f"160000,{object_id},vendor",
+            )
+
+            with self.assertRaisesRegex(ValueError, "submodules are not supported"):
+                build_bundle(submodule_source, submodule_output)
+            self.assertFalse(submodule_output.exists())
+
+    def test_git_tracked_environment_files_are_excluded(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "source"
+            output = base / "bundle"
+            source.mkdir()
+            make_valid_suite(source)
+            (source / ".env").write_text("TOKEN=secret\n", encoding="utf-8")
+            (source / ".env.production").write_text(
+                "TOKEN=secret\n", encoding="utf-8"
+            )
+            (source / "credentials.json").write_text(
+                "{\"token\": \"secret\"}\n", encoding="utf-8"
+            )
+            run_git(source, "init", "--quiet")
+            run_git(source, "add", ".")
+
+            with self.assertRaisesRegex(ValueError, "sensitive file"):
+                build_bundle(source, output)
+
+            (source / "credentials.json").unlink()
+            run_git(source, "add", "-u", ".")
+            plugin_root = build_bundle(source, output)
+
+            self.assertFalse((plugin_root / ".env").exists())
+            self.assertFalse((plugin_root / ".env.production").exists())
 
     def test_rejects_source_symlink_before_creating_output(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -213,6 +296,25 @@ class BundleTests(unittest.TestCase):
                 (output / "owned-by-user.txt").read_text(encoding="utf-8"), "keep\n"
             )
 
+            failed_output = base / "failed-bundle"
+            with patch(
+                "build_bundle.shutil.copy2", side_effect=OSError("copy failed")
+            ):
+                with self.assertRaisesRegex(OSError, "copy failed"):
+                    build_bundle(source, failed_output)
+            self.assertFalse(failed_output.exists())
+            self.assertEqual(list(base.glob(".failed-bundle.building-*")), [])
+
+            empty_output = base / "empty-failed-bundle"
+            empty_output.mkdir()
+            with patch(
+                "build_bundle.shutil.copy2", side_effect=OSError("copy failed")
+            ):
+                with self.assertRaisesRegex(OSError, "copy failed"):
+                    build_bundle(source, empty_output)
+            self.assertTrue(empty_output.is_dir())
+            self.assertEqual(list(empty_output.iterdir()), [])
+
     def test_refuses_output_inside_source_tree(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             source = Path(directory) / "source"
@@ -222,6 +324,76 @@ class BundleTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "outside the source tree"):
                 build_bundle(source, output)
+
+    def test_rejects_output_root_symlink(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "source"
+            target = base / "target"
+            output = base / "bundle-link"
+            source.mkdir()
+            target.mkdir()
+            make_valid_suite(source)
+            try:
+                output.symlink_to(target, target_is_directory=True)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                build_bundle(source, output)
+
+            self.assertEqual(list(target.iterdir()), [])
+
+            parent_target = base / "parent-target"
+            parent_target.mkdir()
+            parent_link = base / "parent-link"
+            parent_link.symlink_to(parent_target, target_is_directory=True)
+
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                build_bundle(source, parent_link / "bundle")
+
+            self.assertEqual(list(parent_target.iterdir()), [])
+
+            with self.assertRaisesRegex(ValueError, "symbolic link"):
+                build_bundle(source, parent_link / ".." / "dotdot-bundle")
+            self.assertFalse((base / "dotdot-bundle").exists())
+
+            output.unlink()
+            build_bundle(source, output)
+            validation_link = base / "validation-link"
+            validation_link.symlink_to(output, target_is_directory=True)
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "validate_bundle.py"),
+                    str(validation_link),
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("bundle root must not be a symbolic link", result.stdout)
+
+            validation_parent = base / "validation-parent"
+            validation_parent.symlink_to(base, target_is_directory=True)
+            nested_link = validation_parent / output.name
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(ROOT / "scripts" / "validate_bundle.py"),
+                    str(nested_link),
+                ],
+                check=False,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("symbolic link", result.stdout)
 
     def test_rejects_marketplace_path_escape(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -287,6 +459,15 @@ class BundleTests(unittest.TestCase):
                 "marketplace must contain only math-modeling-suite", errors
             )
 
+            marketplace = json.loads(marketplace_path.read_text(encoding="utf-8"))
+            marketplace["plugins"] = [marketplace["plugins"][0]]
+            marketplace["plugins"][0]["unexpected"] = True
+            write_json(marketplace_path, marketplace)
+            errors = validate_bundle(output)
+            self.assertIn(
+                "marketplace plugin contains unsupported keys: unexpected", errors
+            )
+
     def test_rejects_absolute_marketplace_path(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -306,6 +487,85 @@ class BundleTests(unittest.TestCase):
 
             self.assertIn(
                 "marketplace source.path must be ./plugins/math-modeling-suite",
+                errors,
+            )
+
+    def test_rejects_symlink_inside_plugin_bundle(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "source"
+            output = base / "bundle"
+            external = base / "external-secret.txt"
+            source.mkdir()
+            make_valid_suite(source)
+            external.write_text("secret\n", encoding="utf-8")
+            build_bundle(source, output)
+            link = output / "plugins" / "math-modeling-suite" / "linked.txt"
+            try:
+                link.symlink_to(external)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+
+            errors = validate_bundle(output)
+
+            self.assertIn(
+                "bundle contains symbolic link: plugins/math-modeling-suite/linked.txt",
+                errors,
+            )
+
+            sensitive = output / "plugins" / "math-modeling-suite" / ".env"
+            sensitive.write_text("TOKEN=secret\n", encoding="utf-8")
+            credentials = (
+                output / "plugins" / "math-modeling-suite" / "credentials.json"
+            )
+            credentials.write_text("{}\n", encoding="utf-8")
+            fifo = output / "plugins" / "math-modeling-suite" / "unsafe-node"
+            try:
+                os.mkfifo(fifo)
+            except (AttributeError, NotImplementedError, OSError):
+                fifo = None
+
+            errors = validate_bundle(output)
+            self.assertIn(
+                "bundle contains sensitive file: plugins/math-modeling-suite/.env",
+                errors,
+            )
+            self.assertIn(
+                "bundle contains sensitive file: "
+                "plugins/math-modeling-suite/credentials.json",
+                errors,
+            )
+
+            injected_git = output / "plugins" / "math-modeling-suite" / ".git"
+            injected_git.mkdir()
+            (injected_git / "config").write_text("[core]\n", encoding="utf-8")
+            errors = validate_bundle(output)
+            self.assertIn(
+                "bundle contains forbidden path: plugins/math-modeling-suite/.git",
+                errors,
+            )
+            if fifo is not None:
+                self.assertIn(
+                    "bundle contains unsupported file type: "
+                    "plugins/math-modeling-suite/unsafe-node",
+                    errors,
+                )
+
+            unreadable = output / "plugins" / "math-modeling-suite" / "unreadable"
+            unreadable.mkdir()
+            (unreadable / "hidden-link").symlink_to(base / "outside")
+            original_scandir = os.scandir
+
+            def scandir_with_denial(path: object):
+                if Path(path).name == unreadable.name:
+                    raise PermissionError("permission denied")
+                return original_scandir(path)
+
+            with patch("validate_bundle.os.scandir", side_effect=scandir_with_denial):
+                errors = validate_bundle(output)
+            self.assertIn(
+                "bundle directory could not be inspected: "
+                "plugins/math-modeling-suite/unreadable",
                 errors,
             )
 

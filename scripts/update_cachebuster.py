@@ -13,7 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from suite_validation import SEMVER_RE
+from suite_validation import SEMVER_RE, ensure_no_symlink_components
 
 
 TOKEN_RE = re.compile(r"^[0-9A-Za-z-]+$")
@@ -71,7 +71,14 @@ def _write_json_atomically(path: Path, payload: dict[str, Any]) -> None:
 
 def update_manifest(path: Path, token: str, *, apply: bool) -> tuple[str, str]:
     """Return old/new versions and write only when ``apply`` is true."""
-    path = path.expanduser().resolve()
+    path = ensure_no_symlink_components(path, "manifest path")
+    try:
+        mode = path.lstat().st_mode
+    except OSError:
+        mode = None
+    if mode is not None and not stat.S_ISREG(mode):
+        raise ValueError("manifest path must be a regular file")
+    path = path.resolve()
     manifest = _load_manifest(path)
     old_version = manifest["version"]
     new_version = replace_cachebuster(old_version, token)

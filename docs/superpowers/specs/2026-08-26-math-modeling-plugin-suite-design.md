@@ -119,7 +119,7 @@ Math-modeling-skill/
 | `math-modeling-validation` | 检查误差、稳健性、敏感性、边界条件和局限 | 有可检验的模型结果 | 验证报告与通过/回退结论 |
 | `math-modeling-paper-writing` | 将已验证的工作整理成用户需要的论文结构和表达 | 用户要求成稿或章节 | 论文草稿/章节 |
 
-主 skill 维护一个阶段注册表，引用上述确切名称。阶段 skill 不直接互相调用；主 skill 可以根据题型跳过数据阶段，也可以在验证失败时回退到模型构建或求解阶段。
+主 skill 维护一个阶段注册表，引用上述确切名称。阶段 skill 不直接互相调用；主 skill 可以根据题型跳过数据阶段，也可以在验证失败时回退到证据所指向的最早失效阶段。
 
 ## 5. 主编排协议
 
@@ -136,6 +136,10 @@ task:
 state:
   current_stage: "problem-analysis"
   status: "complete"
+  validation_status: "pending"
+  completed_stages:
+    - "problem-analysis"
+  invalidated_stages: []
 context:
   assumptions: []
   variables: []
@@ -167,11 +171,11 @@ next:
 problem-analysis → data-analysis? → model-construction
                  → model-solving → validation
 validation(pass) → paper-writing?
-validation(fail) → model-construction | model-solving
+validation(fail) → problem-analysis | data-analysis | model-construction | model-solving
 ```
 
 - `?` 表示主 skill 可根据题目判断跳过，并记录理由。
-- 验证未通过时不得直接进入论文写作。
+- 验证未通过时不得直接进入论文写作；已有验证证据的输入失效后，验证状态立即变为 `stale`，受影响阶段进入 `invalidated_stages` 并依次重跑。
 - 缺少会改变模型选择的关键信息时暂停并向用户提问。
 - 普通细节可以作合理假设，但必须进入 `assumptions` 和 `warnings`。
 - 每个阶段结束时必须明确“已完成什么、证据在哪里、下一阶段需要什么”。
@@ -204,6 +208,8 @@ marketplace 条目使用：
   ]
 }
 ```
+
+构建器先在目标目录的同级临时目录中完成复制，再原子发布到最终路径；复制失败不得留下不可重试的半成品。源码选择与复用 bundle 的校验采用同一组分发边界：环境文件和仓库/缓存元数据被排除，symlink、不可读目录、FIFO/socket/device 等特殊节点、Git submodule、已知凭据文件名和私钥后缀被拒绝。该策略只检查路径名称和文件系统类型，不是通用的内容级 secret scanner，发布前仍需审阅普通文件内容。
 
 ### 6.2 开发者安装流程
 
@@ -241,7 +247,7 @@ codex plugin add math-modeling-suite@math-modeling-local
 
 ### 7.2 Bundle 验证
 
-`validate_bundle.py` 对生成 bundle 中的 `plugins/math-modeling-suite` 运行同一套插件/skill 校验，并检查 marketplace 的 source path 实际指向该插件 manifest。
+`validate_bundle.py` 对生成 bundle 中的 `plugins/math-modeling-suite` 运行同一套插件/skill 校验，检查 marketplace 的 source path 实际指向该插件 manifest，并对新建或复用的整个 bundle 执行分发树策略。
 
 ### 7.3 行为 smoke test
 
@@ -249,7 +255,7 @@ codex plugin add math-modeling-suite@math-modeling-local
 
 1. 主 skill 能列出标准阶段和 handoff 必填字段；
 2. 无数据题目会显式跳过 data-analysis；
-3. validation 返回失败时路由只能回到 model-construction 或 model-solving；
+3. validation 返回失败时只能回到证据支持的最早上游阶段；
 4. 未完成验证不会路由到 paper-writing。
 
 测试只断言可观察的结构和路由不变量，不匹配某一段自然语言措辞。
@@ -257,8 +263,10 @@ codex plugin add math-modeling-suite@math-modeling-local
 ## 8. 错误处理与安全边界
 
 - manifest、skill frontmatter 或 marketplace JSON 无效时，验证和安装在任何全局写入前失败。
-- bundle 输出目录存在且非空时拒绝覆盖；由脚本创建的临时目录可由用户显式删除。
+- bundle 输出目录存在且非空时拒绝覆盖；构建失败时清理本次 staging，保留调用前已存在的空目标目录。
+- 构建时排除环境文件，复用时拒绝事后注入的环境文件；分发边界同时拒绝 symlink、特殊文件、已知凭据文件名和私钥后缀，但不承诺从任意普通文本中识别秘密；发布者仍需审阅 bundle 内容。
 - 安装脚本不读取或打印认证令牌，不自动安装 Python/TeX/求解器依赖。
+- `--apply` 的 marketplace 注册和 plugin 安装是两个外部、顺序执行的命令；第二步失败时可能留下已注册 marketplace。脚本不自动删除外部配置，用户应先检查注册根路径，再用 `--marketplace-registered` 重试或明确移除本次创建的 marketplace。
 - 阶段 skill 不能把未经验证的数值、数据来源或图表标记为已确认；不确定性进入 warnings。
 - 外部写入（marketplace、Codex 配置、插件缓存）必须由显式 `--apply` 或用户直接运行命令触发。
 

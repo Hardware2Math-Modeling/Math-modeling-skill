@@ -21,6 +21,7 @@ state:
   completed_stages:
     - "problem-analysis"
     - "model-construction"
+  invalidated_stages: []
 context:
   assumptions:
     - statement: "Decision variables are continuous in the first candidate formulation."
@@ -82,10 +83,12 @@ next:
 
 - The required top-level fields are `schema_version`, `state`, `result`, and `next`; the canonical task, state, quality, and next keys above must retain their meanings.
 - `state.status` is one of `pending`, `in_progress`, `complete`, `needs_revision`, or `skipped`.
+- `state.validation_status` is `pending` before current validation, `pass` only for a current passing result, `needs_revision` for a current failed or inconclusive validation, and `stale` when previously completed validation has invalidated inputs.
+- `state.completed_stages` contains only stages whose latest terminal outcome remains current: `complete`, or a guard-satisfied `skipped` outcome for an optional stage. This preserves a deliberate skip across resume. `state.invalidated_stages` lists stages whose preserved outputs are audit-only and must be rerun before they can be treated as current again.
 - Use an empty array for any inapplicable collection. Never invent measurements, provenance, citations, computed values, or artifacts.
-- A skipped stage records why it was unnecessary in `result.summary` and records the consequence in `next.rationale`.
+- Only an optional stage may use `skipped`, and only when its workflow guard is satisfied. It records why it was unnecessary in `result.summary` and records the consequence in `next.rationale`.
 - A `needs_revision` result never authorizes a forward transition. It names every failed check in `next.failed_checks`; `next.recommended_stage` proposes a same-stage retry or the earliest invalidated upstream stage, while `next.rationale` explains the evidence and `next.alternatives` records other bounded recovery paths.
-- Preserve earlier results as audit evidence during revision. Record which completed work is invalidated in `context.decisions` and `quality.warnings`, then rerun every invalidated downstream stage before treating validation as current.
+- Preserve earlier results as audit evidence during revision. Move affected stages out of `state.completed_stages` and into `state.invalidated_stages`, record why in `context.decisions` and `quality.warnings`, and set `state.validation_status` to `stale` whenever a prior validation pass depends on invalidated inputs. Rerun every invalidated downstream stage before treating validation as current; remove a stage from `state.invalidated_stages` only after its replacement output is complete.
 - Every stage result states what was completed in `result.details`, where its evidence lives in `artifacts` or `result.evidence`, and what the next stage still requires through `next.rationale` and `next.alternatives`.
 - Preserve equations, variables, units, provenance, assumptions, accepted and rejected models, warnings, confidence, and validation evidence even when a stage is revised.
 
@@ -97,5 +100,5 @@ next:
 | Data analysis | Sources, fields, units, time and sampling scope, provenance, quality findings, transformations, uncertainty, and leakage checks are recorded, or the stage is skipped with a rationale. | Reproducible summaries, transformation rationale, and paths to data-derived artifacts. | Preserve `quality.confidence`, data evidence, and bounded alternatives in `next.alternatives`. |
 | Model construction | Candidate formulations are compared by explicit criteria and one is accepted with equations, domains, assumptions, feasibility checks, solution interface, and planned validation tests. | Dimensional, boundary, identifiability, feasibility, and rejected-alternative evidence. | Record accepted and rejected models in `result`, warnings and confidence in `quality`, and the solving rationale in `next.rationale`. |
 | Model solving | The accepted specification is executed reproducibly and convergence, feasibility, stability, and sanity checks are recorded. | Commands, algorithms, software assumptions, parameter sources, initialization, boundaries, tolerance, seed, stopping rules, results, and failed runs. | Keep execution evidence in `artifacts`/`result.evidence`; use `next.alternatives` for bounded revision paths. |
-| Validation | Prespecified checks and thresholds support an explicit pass, or failures support `needs_revision` with the smallest evidence-backed rollback. | Fit, residual, holdout, sensitivity, uncertainty, robustness, feasibility, dimensional, boundary, and baseline evidence as applicable. | Set `state.validation_status`, `quality.confidence`, `next.failed_checks`, and a construction-or-solving `next.rationale`. |
-| Paper writing | A requested deliverable uses only validation-passed evidence and is internally traceable and consistent. | Relative document and figure paths, citations, equations, units, precision choices, assumptions, limitations, and explicitly reported evidence gaps. | Set `state.current_stage`, preserve editorial warnings, and set `next.recommended_stage: complete` only when supported. |
+| Validation | Prespecified checks and thresholds support an explicit pass, or failures support `needs_revision` with the earliest evidence-backed rollback. | Fit, residual, holdout, sensitivity, uncertainty, robustness, feasibility, dimensional, boundary, data-scope, and baseline evidence as applicable. | Set `state.validation_status`, clear validation from `state.invalidated_stages` only after a current pass, preserve `quality.confidence`, populate `next.failed_checks`, and explain the earliest affected stage in `next.rationale`. |
+| Paper writing | A requested deliverable uses only a current validation pass and is internally traceable and consistent. | Relative document and figure paths, citations, equations, units, precision choices, assumptions, limitations, and explicitly reported evidence gaps. | Require `state.validation_status: pass` with no input stage through validation in `state.invalidated_stages`; set `state.current_stage`, preserve editorial warnings, and set `next.recommended_stage: complete` only when supported. |
