@@ -18,7 +18,7 @@ def _load_marketplace(path: Path, errors: list[str]) -> dict[str, Any] | None:
         return None
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         errors.append("marketplace.json must be readable valid JSON")
         return None
     if not isinstance(payload, dict):
@@ -34,6 +34,12 @@ def _resolve_plugin_root(
     if not isinstance(plugins, list):
         errors.append("marketplace plugins must be an array")
         return None
+    if not (
+        len(plugins) == 1
+        and isinstance(plugins[0], dict)
+        and plugins[0].get("name") == PLUGIN_NAME
+    ):
+        errors.append(f"marketplace must contain only {PLUGIN_NAME}")
     matches = [
         entry
         for entry in plugins
@@ -53,14 +59,18 @@ def _resolve_plugin_root(
         errors.append("marketplace source.path must be a non-empty string")
         return None
 
-    candidate = (bundle_root / raw_path).resolve()
+    try:
+        candidate = (bundle_root / raw_path).resolve()
+        expected = (bundle_root / "plugins" / PLUGIN_NAME).resolve()
+    except (OSError, RuntimeError, ValueError):
+        errors.append("marketplace source.path must be a valid path")
+        return None
     try:
         candidate.relative_to(bundle_root)
     except ValueError:
         errors.append("marketplace source.path escapes the bundle root")
         return None
 
-    expected = (bundle_root / "plugins" / PLUGIN_NAME).resolve()
     if candidate != expected:
         errors.append(f"marketplace source.path must be ./plugins/{PLUGIN_NAME}")
         return None
@@ -78,7 +88,10 @@ def _resolve_plugin_root(
 
 def validate_bundle(bundle_root: Path) -> list[str]:
     """Return deterministic validation errors for a marketplace bundle."""
-    bundle_root = bundle_root.expanduser().resolve()
+    try:
+        bundle_root = Path(bundle_root).expanduser().resolve()
+    except (OSError, RuntimeError, ValueError):
+        return ["bundle root must be a valid path"]
     errors: list[str] = []
     marketplace = _load_marketplace(
         bundle_root / ".agents" / "plugins" / "marketplace.json", errors

@@ -102,6 +102,53 @@ class BundleTests(unittest.TestCase):
 
             self.assertIn("marketplace source.path escapes the bundle root", errors)
 
+    def test_rejects_malformed_marketplace_path(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "source"
+            output = base / "bundle"
+            source.mkdir()
+            make_valid_suite(source)
+            build_bundle(source, output)
+            marketplace_path = output / ".agents" / "plugins" / "marketplace.json"
+            marketplace = json.loads(marketplace_path.read_text(encoding="utf-8"))
+            marketplace["plugins"][0]["source"]["path"] = "\x00"
+            write_json(marketplace_path, marketplace)
+
+            errors = validate_bundle(output)
+
+            self.assertIn("marketplace source.path must be a valid path", errors)
+
+    def test_rejects_malformed_bundle_root(self) -> None:
+        self.assertIn(
+            "bundle root must be a valid path",
+            validate_bundle(Path("\x00")),
+        )
+
+    def test_rejects_extra_marketplace_plugins(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "source"
+            output = base / "bundle"
+            source.mkdir()
+            make_valid_suite(source)
+            build_bundle(source, output)
+            marketplace_path = output / ".agents" / "plugins" / "marketplace.json"
+            marketplace = json.loads(marketplace_path.read_text(encoding="utf-8"))
+            marketplace["plugins"].append(
+                {
+                    "name": "unexpected-plugin",
+                    "source": {"source": "local", "path": "./plugins/unexpected"},
+                }
+            )
+            write_json(marketplace_path, marketplace)
+
+            errors = validate_bundle(output)
+
+            self.assertIn(
+                "marketplace must contain only math-modeling-suite", errors
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

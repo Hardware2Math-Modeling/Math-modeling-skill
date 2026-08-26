@@ -51,7 +51,7 @@ def make_valid_suite(root):
         skill_dir.joinpath("SKILL.md").write_text(
             "---\n"
             f"name: {skill}\n"
-            f"description: {skill} stage instructions.\n"
+            f"description: Use when {skill} is needed for its bounded stage.\n"
             "---\n\n"
             f"{body}\n",
             encoding="utf-8",
@@ -75,7 +75,14 @@ def make_valid_suite(root):
     workflow = {
         "schema_version": "1",
         "orchestrator": "math-modeling-orchestrator",
-        "stages": [{"skill": skill, "optional": skill in {"math-modeling-data-analysis", "math-modeling-paper-writing"}} for skill in STAGE_SKILLS],
+        "stages": [
+            {
+                "id": skill.removeprefix("math-modeling-"),
+                "skill": skill,
+                "optional": skill in {"math-modeling-data-analysis", "math-modeling-paper-writing"},
+            }
+            for skill in STAGE_SKILLS
+        ],
         "transitions": {
             "problem-analysis": ["data-analysis", "model-construction"],
             "data-analysis": ["model-construction"],
@@ -98,6 +105,12 @@ def make_valid_suite(root):
 
 
 class SuiteValidationTests(unittest.TestCase):
+    def test_rejects_malformed_suite_root(self):
+        self.assertIn(
+            "suite root must be a valid path",
+            validate_suite(Path("\x00")),
+        )
+
     def test_valid_suite_has_no_errors(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -186,6 +199,53 @@ class SuiteValidationTests(unittest.TestCase):
             workflow["guards"]["unexpected"] = {"allowed": True}
             write_json(workflow_path, workflow)
             self.assertTrue(any("guards" in error for error in validate_suite(root)))
+
+    def test_skill_description_must_be_trigger_oriented(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            skill_path = root / "skills" / "math-modeling-validation" / "SKILL.md"
+            skill_path.write_text(
+                skill_path.read_text(encoding="utf-8").replace(
+                    "description: Use when math-modeling-validation is needed for its bounded stage.",
+                    "description: Validation helper.",
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any("description must start with 'Use when'" in error for error in validate_suite(root))
+            )
+
+    def test_workflow_stage_id_must_match_skill(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            workflow_path = root / "skills" / "math-modeling-orchestrator" / "references" / "workflow.json"
+            workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+            workflow["stages"][0]["id"] = "wrong-id"
+            write_json(workflow_path, workflow)
+            self.assertTrue(
+                any("workflow stage id" in error for error in validate_suite(root))
+            )
+
+    def test_workflow_stage_optionality_must_be_exact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            workflow_path = root / "skills" / "math-modeling-orchestrator" / "references" / "workflow.json"
+            workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+            workflow["stages"][0]["optional"] = True
+            workflow["stages"][1]["optional"] = False
+            write_json(workflow_path, workflow)
+            errors = validate_suite(root)
+            self.assertIn(
+                "workflow stage math-modeling-problem-analysis optional must be false",
+                errors,
+            )
+            self.assertIn(
+                "workflow stage math-modeling-data-analysis optional must be true",
+                errors,
+            )
 
 
 if __name__ == "__main__":

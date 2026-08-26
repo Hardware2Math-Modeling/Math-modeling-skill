@@ -55,7 +55,7 @@ def _contains_marker(text: str) -> bool:
 def _read_text(path: Path, errors: list[str], label: str) -> str | None:
     try:
         return path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, ValueError):
         errors.append(f"missing {label}")
     except UnicodeDecodeError:
         errors.append(f"unreadable {label}")
@@ -137,14 +137,21 @@ def _parse_frontmatter(text: str) -> dict[str, str] | None:
             continue
         key, value = line.split(":", 1)
         key, value = key.strip(), value.strip()
-        if value.startswith('"'):
-            try:
-                decoded = json.loads(value)
-            except json.JSONDecodeError:
+        if value.startswith(('"', "'")):
+            quote = value[0]
+            if len(value) < 2 or value[-1] != quote:
                 return None
-            if not isinstance(decoded, str):
-                return None
-            value = decoded
+            if quote == '"':
+                try:
+                    decoded = json.loads(value)
+                except json.JSONDecodeError:
+                    return None
+                if not isinstance(decoded, str):
+                    return None
+                value = decoded
+            else:
+                # YAML single-quoted strings escape a quote by doubling it.
+                value = value[1:-1].replace("''", "'")
         values[key] = value
     return values
 
@@ -186,8 +193,25 @@ def _validate_agent(path: Path, skill: str, errors: list[str]) -> None:
 
 def _validate_skills(root: Path, errors: list[str]) -> None:
     skills_root = root / "skills"
-    existing_dirs = sorted((path for path in skills_root.iterdir() if path.is_dir()), key=lambda path: path.name) if skills_root.is_dir() else []
-    missing = [skill for skill in ALL_SKILLS if not (skills_root / skill).is_dir()]
+    try:
+        existing_dirs = (
+            sorted(
+                (path for path in skills_root.iterdir() if path.is_dir()),
+                key=lambda path: path.name,
+            )
+            if skills_root.is_dir()
+            else []
+        )
+    except (OSError, ValueError, RuntimeError):
+        existing_dirs = []
+    missing = []
+    for skill in ALL_SKILLS:
+        try:
+            present = (skills_root / skill).is_dir()
+        except (OSError, ValueError, RuntimeError):
+            present = False
+        if not present:
+            missing.append(skill)
     if missing:
         errors.append("missing required skills: " + ", ".join(missing))
     seen_names: dict[str, str] = {}
@@ -216,6 +240,10 @@ def _validate_skills(root: Path, errors: list[str]) -> None:
                         errors.append(f"{label} frontmatter name must match directory")
                 if not _is_nonempty_string(description) or not 1 <= len(description) <= 1024:
                     errors.append(f"{label} frontmatter description must be 1-1024 characters")
+                elif not description.startswith("Use when"):
+                    errors.append(
+                        f"{label} frontmatter description must start with 'Use when'"
+                    )
             if skill == ORCHESTRATOR_SKILL:
                 for stage in STAGE_SKILLS:
                     if stage not in text:
@@ -250,13 +278,29 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
             if isinstance(skill, str) and skill not in ALL_SKILLS:
                 errors.append(f"workflow stage references unknown skill: {skill}")
         required_optional = {
+            "math-modeling-problem-analysis": False,
             "math-modeling-data-analysis": True,
+            "math-modeling-model-construction": False,
+            "math-modeling-model-solving": False,
+            "math-modeling-validation": False,
             "math-modeling-paper-writing": True,
         }
-        for skill, expected in required_optional.items():
-            stage = next((item for item in stages if item.get("skill") == skill), None)
-            if stage is not None and stage.get("optional") is not expected:
-                errors.append(f"workflow stage {skill} optional must be true")
+        for stage in stages:
+            skill = stage.get("skill")
+            if not isinstance(skill, str):
+                continue
+            expected_id = skill.removeprefix("math-modeling-")
+            if stage.get("id") != expected_id:
+                errors.append(
+                    f"workflow stage id for {skill} must be {expected_id}"
+                )
+            if skill in required_optional:
+                expected_optional = required_optional[skill]
+                if stage.get("optional") is not expected_optional:
+                    expected_word = "true" if expected_optional else "false"
+                    errors.append(
+                        f"workflow stage {skill} optional must be {expected_word}"
+                    )
 
     transitions = workflow.get("transitions")
     if not isinstance(transitions, dict):
@@ -302,7 +346,10 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
 
 def validate_suite(root: Path) -> list[str]:
     """Return deterministic, human-readable contract errors for a suite root."""
-    root = Path(root)
+    try:
+        root = Path(root).expanduser().resolve()
+    except (OSError, RuntimeError, TypeError, ValueError):
+        return ["suite root must be a valid path"]
     errors: list[str] = []
     _validate_manifest(root, errors)
     _validate_skills(root, errors)
