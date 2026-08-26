@@ -70,7 +70,24 @@ def make_valid_suite(root):
 
     contract = root / "skills" / "math-modeling-orchestrator" / "references" / "handoff-contract.md"
     contract.parent.mkdir()
-    contract.write_text("\n".join(f"{field}: required" for field in HANDOFF_REQUIRED_FIELDS), encoding="utf-8")
+    contract.write_text(
+        "schema_version: \"1\"\n"
+        "task:\n"
+        "  statement: \"required\"\n"
+        "  objectives: []\n"
+        "  constraints: []\n"
+        "state:\n"
+        "  current_stage: \"problem-analysis\"\n"
+        "result:\n"
+        "  summary: \"required\"\n"
+        "next:\n"
+        "  rationale: \"required\"\n"
+        "  alternatives: []\n"
+        "quality:\n"
+        "  warnings: []\n"
+        "  confidence: \"medium\"\n",
+        encoding="utf-8",
+    )
 
     workflow = {
         "schema_version": "1",
@@ -245,6 +262,47 @@ class SuiteValidationTests(unittest.TestCase):
             self.assertIn(
                 "workflow stage math-modeling-data-analysis optional must be true",
                 errors,
+            )
+
+    def test_frontmatter_rejects_unstructured_yaml_line(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            skill_path = root / "skills" / "math-modeling-validation" / "SKILL.md"
+            skill_path.write_text(
+                skill_path.read_text(encoding="utf-8").replace(
+                    "description: Use when math-modeling-validation is needed for its bounded stage.",
+                    "not valid yaml\ndescription: Validation helper.",
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any("invalid frontmatter" in error for error in validate_suite(root))
+            )
+
+    def test_agent_yaml_rejects_unstructured_yaml_line(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            agent_path = root / "skills" / "math-modeling-validation" / "agents" / "openai.yaml"
+            agent_path.write_text(
+                agent_path.read_text(encoding="utf-8") + "broken: [\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any("invalid YAML" in error for error in validate_suite(root))
+            )
+
+    def test_handoff_contract_requires_canonical_nested_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            contract_path = root / "skills" / "math-modeling-orchestrator" / "references" / "handoff-contract.md"
+            contract = contract_path.read_text(encoding="utf-8")
+            contract = contract.replace('  statement: "required"\n', "")
+            contract_path.write_text(contract, encoding="utf-8")
+            self.assertTrue(
+                any("handoff contract must show task.statement" in error for error in validate_suite(root))
             )
 
 

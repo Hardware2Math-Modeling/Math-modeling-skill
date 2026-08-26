@@ -21,6 +21,16 @@ STAGE_SKILLS = (
 ALL_SKILLS = (ORCHESTRATOR_SKILL, *STAGE_SKILLS)
 HANDOFF_REQUIRED_FIELDS = ("schema_version", "state", "result", "next")
 HANDOFF_STATUSES = ("pending", "in_progress", "complete", "needs_revision", "skipped")
+HANDOFF_CANONICAL_PATHS = (
+    ("task", "statement"),
+    ("task", "objectives"),
+    ("task", "constraints"),
+    ("state", "current_stage"),
+    ("quality", "warnings"),
+    ("quality", "confidence"),
+    ("next", "rationale"),
+    ("next", "alternatives"),
+)
 
 SEMVER_RE = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
@@ -123,6 +133,34 @@ def _validate_manifest(root: Path, errors: list[str]) -> None:
         errors.append(f"manifest interface.defaultPrompt must mention ${ORCHESTRATOR_SKILL}")
 
 
+def _parse_scalar(value: str, *, quoted_only: bool = False) -> str | None:
+    """Parse the small scalar subset supported by skill metadata YAML."""
+    value = value.strip()
+    if not value:
+        return None
+    if value.startswith('"'):
+        if len(value) < 2 or not value.endswith('"'):
+            return None
+        try:
+            decoded = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return decoded if isinstance(decoded, str) else None
+    if value.startswith("'"):
+        if len(value) < 2 or not value.endswith("'"):
+            return None
+        return value[1:-1].replace("''", "'")
+    if quoted_only:
+        return None
+    if value in {"true", "false", "null", "~"}:
+        return None
+    if value.startswith(("[", "{", "&", "*", "!", "|", ">")):
+        return None
+    if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", value):
+        return None
+    return value
+
+
 def _parse_frontmatter(text: str) -> dict[str, str] | None:
     lines = text.splitlines()
     if not lines or lines[0].strip() != "---":
@@ -133,27 +171,65 @@ def _parse_frontmatter(text: str) -> dict[str, str] | None:
         return None
     values: dict[str, str] = {}
     for line in lines[1:closing]:
-        if not line.strip() or line.startswith((" ", "\t", "#")) or ":" not in line:
+        if not line.strip() or line.lstrip().startswith("#"):
             continue
+        if line.startswith((" ", "\t")) or ":" not in line:
+            return None
         key, value = line.split(":", 1)
         key, value = key.strip(), value.strip()
-        if value.startswith(('"', "'")):
-            quote = value[0]
-            if len(value) < 2 or value[-1] != quote:
-                return None
-            if quote == '"':
-                try:
-                    decoded = json.loads(value)
-                except json.JSONDecodeError:
-                    return None
-                if not isinstance(decoded, str):
-                    return None
-                value = decoded
-            else:
-                # YAML single-quoted strings escape a quote by doubling it.
-                value = value[1:-1].replace("''", "'")
-        values[key] = value
+        if not re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*", key) or key in values:
+            return None
+        parsed = _parse_scalar(value)
+        if parsed is None:
+            return None
+        values[key] = parsed
     return values
+
+
+def _parse_agent_yaml(text: str, label: str, errors: list[str]) -> dict[str, dict[str, str]]:
+    """Parse the intentionally narrow, strict openai.yaml metadata subset."""
+    sections: dict[str, dict[str, str]] = {}
+    current: str | None = None
+    for line_number, line in enumerate(text.splitlines(), 1):
+        if not line.strip() or line.lstrip().startswith("#"):
+            continue
+        if line.startswith("\t") or line.startswith(" ") and not line.startswith("  "):
+            errors.append(f"{label} invalid YAML at line {line_number}")
+            continue
+        if line.startswith("  "):
+            if current is None or line.startswith("   "):
+                errors.append(f"{label} invalid YAML at line {line_number}")
+                continue
+            match = re.fullmatch(r"  ([a-z_][a-z0-9_]*):[ \t]*(.*)", line)
+            if match is None:
+                errors.append(f"{label} invalid YAML at line {line_number}")
+                continue
+            key, raw_value = match.groups()
+            section = sections[current]
+            if key in section:
+                errors.append(f"{label} invalid YAML duplicate key {key}")
+                continue
+            quoted_only = current == "interface"
+            if current == "policy" and key == "allow_implicit_invocation":
+                parsed = raw_value.strip() if raw_value.strip() in {"true", "false"} else None
+            else:
+                parsed = _parse_scalar(raw_value, quoted_only=quoted_only)
+            if parsed is None:
+                errors.append(f"{label} invalid YAML at line {line_number}")
+                continue
+            section[key] = parsed
+            continue
+        match = re.fullmatch(r"([a-z_][a-z0-9_]*):[ \t]*(.*)", line)
+        if match is None:
+            errors.append(f"{label} invalid YAML at line {line_number}")
+            continue
+        section, raw_value = match.groups()
+        if raw_value.strip() or section in sections:
+            errors.append(f"{label} invalid YAML at line {line_number}")
+            continue
+        sections[section] = {}
+        current = section
+    return sections
 
 
 def _validate_agent(path: Path, skill: str, errors: list[str]) -> None:
@@ -163,32 +239,30 @@ def _validate_agent(path: Path, skill: str, errors: list[str]) -> None:
         return
     if _contains_marker(text):
         errors.append(f"{label} contains scaffold marker")
-    sections: dict[str, list[str]] = {}
-    current: str | None = None
-    for line in text.splitlines():
-        section = re.fullmatch(r"([a-z_]+):\s*", line)
-        if section:
-            current = section.group(1)
-            sections.setdefault(current, [])
-        elif current is not None:
-            sections[current].append(line)
-    interface_lines = "\n".join(sections.get("interface", []))
+    sections = _parse_agent_yaml(text, label, errors)
+    interface = sections.get("interface", {})
     fields: dict[str, str] = {}
     for field in ("display_name", "short_description", "default_prompt"):
-        match = re.search(rf'(?m)^  {re.escape(field)}:\s*("(?:[^"\\]|\\.)*")\s*$', interface_lines)
-        if not match:
+        value = interface.get(field)
+        if not isinstance(value, str) or not value.strip():
             errors.append(f"{label} requires quoted {field}")
             continue
-        try:
-            fields[field] = json.loads(match.group(1))
-        except json.JSONDecodeError:
-            errors.append(f"{label} has invalid quoted {field}")
+        fields[field] = value
+    unexpected_sections = sorted(set(sections) - {"interface", "policy"})
+    if unexpected_sections:
+        errors.append(f"{label} contains unsupported sections: {', '.join(unexpected_sections)}")
+    unexpected_interface = sorted(set(interface) - {"display_name", "short_description", "default_prompt"})
+    if unexpected_interface:
+        errors.append(f"{label} interface contains unsupported keys: {', '.join(unexpected_interface)}")
     prompt = fields.get("default_prompt")
     if prompt is not None and f"${skill}" not in prompt:
         errors.append(f"{label} default_prompt must mention ${skill}")
-    policy_lines = "\n".join(sections.get("policy", []))
-    if not re.search(r"(?m)^  allow_implicit_invocation:\s*true\s*$", policy_lines):
+    policy = sections.get("policy", {})
+    if policy.get("allow_implicit_invocation") != "true":
         errors.append(f"{label} allow_implicit_invocation must be true")
+    unexpected_policy = sorted(set(policy) - {"allow_implicit_invocation"})
+    if unexpected_policy:
+        errors.append(f"{label} policy contains unsupported keys: {', '.join(unexpected_policy)}")
 
 
 def _validate_skills(root: Path, errors: list[str]) -> None:
@@ -342,6 +416,16 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
         for field in HANDOFF_REQUIRED_FIELDS:
             if not re.search(rf"(?m)^\s*{re.escape(field)}\s*:", contract):
                 errors.append(f"handoff contract must show {field}:")
+        for parent, child in HANDOFF_CANONICAL_PATHS:
+            parent_match = re.search(rf"(?m)^{re.escape(parent)}\s*:\s*$", contract)
+            if parent_match is None:
+                errors.append(f"handoff contract must show {parent}.{child}")
+                continue
+            remainder = contract[parent_match.end():]
+            next_parent = re.search(r"(?m)^[A-Za-z][A-Za-z0-9_-]*\s*:\s*$", remainder)
+            section = remainder if next_parent is None else remainder[: next_parent.start()]
+            if not re.search(rf"(?m)^  {re.escape(child)}\s*:", section):
+                errors.append(f"handoff contract must show {parent}.{child}")
 
 
 def validate_suite(root: Path) -> list[str]:

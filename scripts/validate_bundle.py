@@ -58,6 +58,7 @@ def _resolve_plugin_root(
     if not isinstance(raw_path, str) or not raw_path:
         errors.append("marketplace source.path must be a non-empty string")
         return None
+    expected_raw_path = f"./plugins/{PLUGIN_NAME}"
 
     try:
         candidate = (bundle_root / raw_path).resolve()
@@ -72,7 +73,10 @@ def _resolve_plugin_root(
         return None
 
     if candidate != expected:
-        errors.append(f"marketplace source.path must be ./plugins/{PLUGIN_NAME}")
+        errors.append(f"marketplace source.path must be {expected_raw_path}")
+        return None
+    if raw_path != expected_raw_path:
+        errors.append(f"marketplace source.path must be {expected_raw_path}")
         return None
 
     expected_policy = {
