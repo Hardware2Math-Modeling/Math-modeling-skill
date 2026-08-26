@@ -29,6 +29,16 @@ Invoke exactly the stage whose entry condition is satisfied:
 
 After each return, merge the updated handoff without discarding `task.statement`, `task.objectives`, `task.constraints`, equations, variable definitions, units, provenance, assumptions, accepted or rejected model alternatives, artifact paths, failed runs, `quality.warnings`, `quality.confidence`, or validation evidence. Treat `next.rationale` and `next.alternatives` as recommendations, then apply the workflow guards yourself.
 
+## Revision control
+
+Workflow transitions apply only after a stage returns `complete` or `skipped`. A `needs_revision` result never advances to a downstream stage.
+
+- When the failed check belongs to the current stage and its upstream handoff is still valid, record the evidence and retry the current stage.
+- When new evidence invalidates upstream work, roll back to the earliest invalidated upstream stage. Preserve the prior result as audit evidence and mark later completed work as invalidated rather than erasing it.
+- After the correction is complete, rerun every invalidated downstream stage in normal workflow order, including validation. A prior validation result cannot authorize paper writing after its inputs have been invalidated.
+
+The stage's `next` fields describe a proposed recovery, not permission to bypass these rules. Pause for genuinely model-changing user input when neither a same-stage retry nor an evidence-backed rollback is possible.
+
 ## Validation gate and rollback
 
 Validation failure can never route to paper writing. When validation returns `needs_revision`:

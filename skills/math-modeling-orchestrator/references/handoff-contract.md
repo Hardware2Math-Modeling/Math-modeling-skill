@@ -84,7 +84,8 @@ next:
 - `state.status` is one of `pending`, `in_progress`, `complete`, `needs_revision`, or `skipped`.
 - Use an empty array for any inapplicable collection. Never invent measurements, provenance, citations, computed values, or artifacts.
 - A skipped stage records why it was unnecessary in `result.summary` and records the consequence in `next.rationale`.
-- A `needs_revision` result names every failed check in `next.failed_checks` and recommends model construction for structural or assumption failures, or model solving for implementation, parameter, convergence, or reproducibility failures. Put alternatives in `next.alternatives` when more than one bounded path remains.
+- A `needs_revision` result never authorizes a forward transition. It names every failed check in `next.failed_checks`; `next.recommended_stage` proposes a same-stage retry or the earliest invalidated upstream stage, while `next.rationale` explains the evidence and `next.alternatives` records other bounded recovery paths.
+- Preserve earlier results as audit evidence during revision. Record which completed work is invalidated in `context.decisions` and `quality.warnings`, then rerun every invalidated downstream stage before treating validation as current.
 - Every stage result states what was completed in `result.details`, where its evidence lives in `artifacts` or `result.evidence`, and what the next stage still requires through `next.rationale` and `next.alternatives`.
 - Preserve equations, variables, units, provenance, assumptions, accepted and rejected models, warnings, confidence, and validation evidence even when a stage is revised.
 

@@ -87,6 +87,17 @@ class RepositoryContractTests(unittest.TestCase):
             text,
         )
 
+    def test_needs_revision_does_not_advance_downstream(self) -> None:
+        text = ORCHESTRATOR_PATH.read_text(encoding="utf-8")
+        for rule in (
+            "Workflow transitions apply only after a stage returns `complete` or `skipped`.",
+            "A `needs_revision` result never advances to a downstream stage.",
+            "retry the current stage",
+            "earliest invalidated upstream stage",
+            "rerun every invalidated downstream stage",
+        ):
+            self.assertIn(rule, text)
+
 
 if __name__ == "__main__":
     unittest.main()
