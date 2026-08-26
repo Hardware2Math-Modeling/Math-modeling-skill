@@ -20,6 +20,7 @@ WORKFLOW_PATH = (
     / "references"
     / "workflow.json"
 )
+HANDOFF_PATH = WORKFLOW_PATH.parent / "handoff-contract.md"
 
 
 class RepositoryContractTests(unittest.TestCase):
@@ -46,6 +47,35 @@ class RepositoryContractTests(unittest.TestCase):
             True,
             workflow["guards"]["paper-writing"]["requires_validation_pass"],
         )
+
+    def test_handoff_contract_uses_canonical_schema_keys(self) -> None:
+        contract = HANDOFF_PATH.read_text(encoding="utf-8")
+        for key in (
+            "statement",
+            "objectives",
+            "constraints",
+            "current_stage",
+            "warnings",
+            "confidence",
+            "rationale",
+            "alternatives",
+        ):
+            self.assertRegex(contract, rf"(?m)^\s*{key}:")
+        for legacy in ("title", "source", "stage", "reason", "needs"):
+            self.assertNotRegex(contract, rf"(?m)^\s*{legacy}:")
+
+    def test_stage_outputs_name_canonical_handoff_keys(self) -> None:
+        for skill in STAGE_SKILLS:
+            text = (ROOT / "skills" / skill / "SKILL.md").read_text(encoding="utf-8")
+            with self.subTest(skill=skill):
+                self.assertIn("state.current_stage", text)
+                self.assertIn("quality.warnings", text)
+                self.assertIn("quality.confidence", text)
+                self.assertIn("next.rationale", text)
+                self.assertIn("next.alternatives", text)
+                self.assertNotIn("state.stage", text)
+                self.assertNotIn("next.reason", text)
+                self.assertNotIn("next.needs", text)
 
 
 if __name__ == "__main__":

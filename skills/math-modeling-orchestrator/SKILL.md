@@ -11,9 +11,9 @@ Coordinate the modeling task while keeping one traceable handoff as the source o
 
 Before routing, read [references/workflow.json](references/workflow.json) for the allowed stages, transitions, and guards, and read [references/handoff-contract.md](references/handoff-contract.md) for the handoff schema and evidence rules.
 
-- For a new task, construct a handoff from the problem statement before invoking a stage.
-- For a task with an existing handoff, continue from its recorded `state`, evidence, failures, and `next` recommendation; do not restart completed work without a stated reason.
-- Ask the user only for missing information that would change the objective, constraints, or model selection. Record ordinary working assumptions as provisional assumptions with provenance.
+- For a new task, construct the canonical handoff before invoking a stage: preserve the faithful prompt in `task.statement`, explicit goals in `task.objectives`, explicit limits in `task.constraints`, and set `state.current_stage` to the stage being entered.
+- For a task with an existing handoff, continue from its recorded `state.current_stage`, `state.status`, evidence, failures, and `next.recommended_stage`; do not restart completed work without a rationale.
+- Ask the user only for missing information that would change the objective, constraints, or model selection. Record ordinary working assumptions as provisional assumptions with provenance, surface their consequences in `quality.warnings`, and set an evidence-based `quality.confidence`.
 - Treat every stage response as an updated handoff plus a recommendation. The stage does not decide cross-stage routing; this orchestrator applies the workflow and guards.
 
 ## Stage routing
@@ -27,7 +27,7 @@ Invoke exactly the stage whose entry condition is satisfied:
 5. Invoke `$math-modeling-validation` when solver results and reproducible evidence are available for the prespecified checks.
 6. Invoke `$math-modeling-paper-writing` only after validation explicitly passes and the user requests a paper or revision of validated material. Otherwise finish after validation without entering this optional stage.
 
-After each return, merge the updated handoff without discarding equations, variable definitions, units, provenance, assumptions, accepted or rejected model alternatives, artifact paths, failed runs, or validation evidence.
+After each return, merge the updated handoff without discarding `task.statement`, `task.objectives`, `task.constraints`, equations, variable definitions, units, provenance, assumptions, accepted or rejected model alternatives, artifact paths, failed runs, `quality.warnings`, `quality.confidence`, or validation evidence. Treat `next.rationale` and `next.alternatives` as recommendations, then apply the workflow guards yourself.
 
 ## Validation gate and rollback
 
@@ -36,7 +36,7 @@ Validation failure can never route to paper writing. When validation returns `ne
 - route to model construction for structural, assumption, dimensional, boundary, identifiability, or formulation failures;
 - route to model solving for implementation, parameter, convergence, numerical, or reproducibility failures.
 
-Record the failed checks and rollback reason before invoking the selected stage. Do not claim that the full modeling task is complete until validation passes.
+Record the failed checks, rollback decision in `next.rationale`, and any bounded fallback in `next.alternatives` before invoking the selected stage. Do not claim that the full modeling task is complete until validation passes.
 
 ## Completion
 
