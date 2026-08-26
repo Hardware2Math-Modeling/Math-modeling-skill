@@ -1,0 +1,30 @@
+{
+  "name": "math-modeling-suite",
+  "version": "0.1.0",
+  "description": "A staged Codex skill suite for mathematical modeling problems.",
+  "author": {
+    "name": "硬件重组之打数模"
+  },
+  "license": "MIT",
+  "keywords": [
+    "mathematical-modeling",
+    "CUMCM",
+    "research"
+  ],
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Math Modeling Suite",
+    "shortDescription": "Solve modeling problems in explicit stages",
+    "longDescription": "Coordinate problem analysis, data analysis, model construction, model solving, validation, and paper writing for mathematical modeling work.",
+    "developerName": "硬件重组之打数模",
+    "category": "Education & Research",
+    "capabilities": [
+      "Interactive",
+      "Read",
+      "Write"
+    ],
+    "defaultPrompt": [
+      "Use $math-modeling-orchestrator to work through this modeling problem."
+    ]
+  }
+}

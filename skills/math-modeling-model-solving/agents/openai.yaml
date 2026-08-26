@@ -1,0 +1,6 @@
+interface:
+  display_name: "Mathematical Model Solving"
+  short_description: "Solve an accepted model with reproducible evidence"
+  default_prompt: "Use $math-modeling-model-solving to solve this accepted model reproducibly."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Modeling Data Analysis"
+  short_description: "Assess modeling data quality and provenance"
+  default_prompt: "Use $math-modeling-data-analysis to assess this modeling dataset and its provenance."
+policy:
+  allow_implicit_invocation: true

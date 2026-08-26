@@ -1,0 +1,87 @@
+{
+  "schema_version": "1",
+  "orchestrator": "math-modeling-orchestrator",
+  "stages": [
+    {
+      "id": "problem-analysis",
+      "skill": "math-modeling-problem-analysis",
+      "optional": false
+    },
+    {
+      "id": "data-analysis",
+      "skill": "math-modeling-data-analysis",
+      "optional": true
+    },
+    {
+      "id": "model-construction",
+      "skill": "math-modeling-model-construction",
+      "optional": false
+    },
+    {
+      "id": "model-solving",
+      "skill": "math-modeling-model-solving",
+      "optional": false
+    },
+    {
+      "id": "validation",
+      "skill": "math-modeling-validation",
+      "optional": false
+    },
+    {
+      "id": "paper-writing",
+      "skill": "math-modeling-paper-writing",
+      "optional": true
+    }
+  ],
+  "transitions": {
+    "problem-analysis": [
+      "data-analysis",
+      "model-construction"
+    ],
+    "data-analysis": [
+      "model-construction"
+    ],
+    "model-construction": [
+      "model-solving"
+    ],
+    "model-solving": [
+      "validation"
+    ],
+    "validation-pass": [
+      "paper-writing",
+      "complete"
+    ],
+    "validation-fail": [
+      "model-construction",
+      "model-solving"
+    ],
+    "paper-writing": [
+      "complete"
+    ]
+  },
+  "guards": {
+    "data-analysis-skip": {
+      "allowed": true,
+      "requires_reason": true
+    },
+    "paper-writing": {
+      "optional": true,
+      "requires_validation_pass": true
+    }
+  },
+  "handoff": {
+    "required_fields": [
+      "schema_version",
+      "state",
+      "result",
+      "next"
+    ],
+    "statuses": [
+      "pending",
+      "in_progress",
+      "complete",
+      "needs_revision",
+      "skipped"
+    ]
+  }
+}

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Math Modeling Orchestrator"
+  short_description: "Coordinate a traceable mathematical modeling task"
+  default_prompt: "Use $math-modeling-orchestrator to coordinate this mathematical modeling problem."
+policy:
+  allow_implicit_invocation: true

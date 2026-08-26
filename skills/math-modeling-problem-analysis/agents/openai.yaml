@@ -1,0 +1,6 @@
+interface:
+  display_name: "Modeling Problem Analysis"
+  short_description: "Clarify modeling objectives, constraints, and units"
+  default_prompt: "Use $math-modeling-problem-analysis to clarify this modeling problem statement."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Mathematical Modeling Paper Writing"
+  short_description: "Write from validated modeling evidence only"
+  default_prompt: "Use $math-modeling-paper-writing to draft from these validated modeling results."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Mathematical Model Construction"
+  short_description: "Define and compare mathematical model formulations"
+  default_prompt: "Use $math-modeling-model-construction to formalize and compare candidate models."
+policy:
+  allow_implicit_invocation: true

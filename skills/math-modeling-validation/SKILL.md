@@ -1,0 +1,28 @@
+---
+name: math-modeling-validation
+description: Use when a mathematical model or its results need evidence-based checks of fit, feasibility, sensitivity, uncertainty, robustness, dimensions, boundaries, or baselines; do not use to draft a paper.
+---
+
+# Mathematical Modeling Validation
+
+Decide explicitly whether the model's supported claims pass prespecified checks, and identify the smallest evidence-backed rollback when they do not.
+
+## Input
+
+Accept the current handoff with the model specification, solution evidence, artifacts, and prespecified tests. When invoked independently, first read [the shared handoff contract](../math-modeling-orchestrator/references/handoff-contract.md) and normalize the handoff before validation.
+
+## Responsibilities
+
+- Apply the checks appropriate to the claim and available evidence: fit, residual diagnostics, holdout performance, sensitivity, uncertainty, robustness, feasibility, dimensional consistency, boundary behavior, and comparison with a meaningful baseline.
+- Use acceptance thresholds specified before seeing validation outcomes. If a threshold must change, record why, treat the prior check as failed or inconclusive, and rerun the affected validation; never move a threshold merely to pass.
+- Trace every check to the exact result, command, dataset scope, seed where relevant, and relative artifact path. Training fit alone cannot substitute for available holdout, boundary, sensitivity, or robustness evidence.
+- State limitations, failure domains, extrapolation boundaries, data scope, and uncertainty without hiding contradictory evidence.
+- Return an explicit pass only when all required checks meet their thresholds. Otherwise return `needs_revision`, name the failed checks, and recommend the smallest rollback: model construction for structural or assumption failures, or model solving for implementation, parameter, convergence, or reproducibility failures.
+
+## Boundaries
+
+Never recommend or begin paper writing after a validation failure. Do not create missing evidence, retune the model without recording a new validation cycle, or convert an inconclusive result into a pass. Do not invoke another skill. This stage does not announce that the full modeling task is complete.
+
+## Output
+
+Return an updated handoff with `state.stage` set to `validation`, `state.validation_status` set explicitly to `pass` or `needs_revision`, and a matching stage status. In `result`, preserve thresholds, check results, evidence, limitations, failure and extrapolation domains, and relative artifact paths. On failure, `next.failed_checks` and the construction-or-solving rollback recommendation are mandatory. On pass, state the validated claims and remaining limitations; the orchestrator still decides whether the task ends or an optional paper is requested.
