@@ -20,10 +20,11 @@ sys.path.insert(0, str(SCRIPTS))
 
 from handoff_schema import (  # noqa: E402
     load_and_validate,
+    load_json_strict,
     migrate_payload,
     validate_document,
 )
-from migrate_handoff import serialize_payload  # noqa: E402
+from migrate_handoff import _canonical_output_path, serialize_payload  # noqa: E402
 
 
 def valid_handoff() -> dict[str, object]:
@@ -375,6 +376,16 @@ class HandoffSchemaTests(unittest.TestCase):
                 self.assertTrue(any("artifacts[0].path" in error for error in errors))
                 self.assertIsNone(re.fullmatch(pattern, invalid))
 
+    def test_schema_and_runtime_reject_control_character_path_bypasses(self) -> None:
+        pattern = load_schema("handoff")["$defs"]["relativePath"]["pattern"]
+        for invalid in ("a\n/../x", "a\n//x", "a\n/./x", "a\n/", "a\x7fx"):
+            with self.subTest(path=invalid):
+                payload = valid_handoff()
+                payload["artifacts"][0]["path"] = invalid
+                errors = validate_document(payload, kind="handoff")
+                self.assertTrue(any("artifacts[0].path" in error for error in errors))
+                self.assertIsNone(re.fullmatch(pattern, invalid))
+
     def test_valid_needs_revision_is_accepted(self) -> None:
         self.assertEqual(
             [], validate_document(valid_needs_revision(), kind="handoff", mode="runtime")
@@ -597,6 +608,34 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertEqual("stale", migrated["state"]["validation_status"])
         self.assertTrue(any("hash" in warning for warning in migrated["quality"]["warnings"]))
 
+    def test_migration_rejects_unrecognized_legacy_artifact_entries(self) -> None:
+        legacy = valid_legacy_handoff()
+        legacy["state"]["validation_status"] = "pass"
+        legacy["artifacts"] = [
+            {"path": "artifacts/result.json", "kind": "result", "description": "evidence", "sha256": "a" * 64},
+            "unrecognized",
+        ]
+        with self.assertRaisesRegex(ValueError, r"artifacts\[1\]"):
+            migrate_payload(legacy)
+
+    def test_legacy_pass_with_incomplete_artifact_is_always_stale(self) -> None:
+        complete = {
+            "path": "artifacts/result.json",
+            "kind": "result",
+            "description": "evidence",
+            "sha256": "a" * 64,
+        }
+        for missing in complete:
+            with self.subTest(missing=missing):
+                legacy = valid_legacy_handoff()
+                legacy["state"]["validation_status"] = "pass"
+                artifact = dict(complete)
+                artifact.pop(missing)
+                legacy["artifacts"] = [artifact]
+                migrated = migrate_payload(legacy)
+                self.assertEqual("stale", migrated["state"]["validation_status"])
+                self.assertTrue(any("hash" in warning for warning in migrated["quality"]["warnings"]))
+
     def test_legacy_mode_explicitly_migrates_for_validation(self) -> None:
         legacy = {
             "schema_version": "1",
@@ -631,6 +670,35 @@ class HandoffSchemaTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(ValueError, "non-standard JSON constant"):
                     load_and_validate(path, kind="handoff")
+
+    def test_strict_loader_and_clis_reject_duplicate_json_keys(self) -> None:
+        root_duplicate = '{"schema_version":"2","schema_version":"1"}'
+        nested_duplicate = '{"schema_version":"1","task":{"statement":"a","statement":"b"}}'
+        for text in (root_duplicate, nested_duplicate):
+            with self.subTest(text=text):
+                with self.assertRaisesRegex(ValueError, "duplicate key"):
+                    load_json_strict(text)
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            runtime_path = base / "runtime.json"
+            legacy_path = base / "legacy.json"
+            output_path = base / "v2.json"
+            runtime_path.write_text(root_duplicate, encoding="utf-8")
+            legacy_path.write_text(nested_duplicate, encoding="utf-8")
+            validated = subprocess.run(
+                [sys.executable, str(SCRIPTS / "validate_handoff.py"), "--input", str(runtime_path), "--json"],
+                check=False, capture_output=True, text=True,
+            )
+            migrated = subprocess.run(
+                [sys.executable, str(SCRIPTS / "migrate_handoff.py"), "--input", str(legacy_path), "--output", str(output_path)],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(1, validated.returncode)
+            self.assertFalse(json.loads(validated.stdout)["valid"])
+            self.assertIn("duplicate key", validated.stdout)
+            self.assertEqual(1, migrated.returncode)
+            self.assertIn("duplicate key", migrated.stderr)
+            self.assertFalse(output_path.exists())
 
     def test_validation_cli_json_rejects_nonstandard_constant(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -725,6 +793,34 @@ class HandoffSchemaTests(unittest.TestCase):
                 check=False,
                 capture_output=True,
                 text=True,
+            )
+            self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+            self.assertIn("symlink", result.stderr)
+            self.assertFalse(output_path.exists())
+
+    def test_migration_cli_validates_artifacts_against_output_root(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "source"
+            output_root = base / "output"
+            outside = base / "outside"
+            source.joinpath("artifacts").mkdir(parents=True)
+            output_root.mkdir()
+            outside.mkdir()
+            source.joinpath("artifacts/result.json").write_text("{}", encoding="utf-8")
+            outside.joinpath("result.json").write_text("{}", encoding="utf-8")
+            try:
+                output_root.joinpath("artifacts").symlink_to(outside, target_is_directory=True)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+            legacy = valid_legacy_handoff()
+            legacy["artifacts"] = [{"path": "artifacts/result.json", "kind": "result", "description": "evidence"}]
+            input_path = source / "legacy.json"
+            output_path = output_root / "v2.json"
+            input_path.write_text(json.dumps(legacy), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPTS / "migrate_handoff.py"), "--input", str(input_path), "--output", str(output_path)],
+                check=False, capture_output=True, text=True,
             )
             self.assertEqual(1, result.returncode, result.stdout + result.stderr)
             self.assertIn("symlink", result.stderr)
@@ -832,6 +928,53 @@ class HandoffSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "JSON"):
             serialize_payload(migrated, pretty=False)
 
+    def test_serialization_preflights_all_strict_json_values(self) -> None:
+        for invalid in ((1, 2), {1: "value"}, float("nan")):
+            with self.subTest(value=type(invalid).__name__):
+                with self.assertRaisesRegex(ValueError, "strict JSON"):
+                    serialize_payload({"value": invalid})
+
+    def test_windows_output_paths_reject_lexical_traversal(self) -> None:
+        for invalid in (
+            r"C:\project\..\outside\v2.json",
+            r"\\server\share\..\outside\v2.json",
+            r"C:project\..\outside\v2.json",
+            r"C:\project\.\v2.json",
+        ):
+            with self.subTest(path=invalid), self.assertRaisesRegex(ValueError, r"\.\."):
+                _canonical_output_path(invalid)
+        self.assertEqual(Path(r"C:\project\v2.json"), _canonical_output_path(r"C:\project\v2.json"))
+
+    def test_deep_direct_and_text_json_fail_without_recursion_error(self) -> None:
+        payload = valid_handoff_with_computed_value()
+        nested: object = "leaf"
+        for _ in range(1400):
+            nested = [nested]
+        payload["result"]["computed_values"][0]["value"] = nested
+        errors = validate_document(payload, kind="handoff")
+        self.assertTrue(any("maximum JSON depth" in error for error in errors))
+        deep_text = "[" * 1400 + "0" + "]" * 1400
+        with self.assertRaisesRegex(ValueError, "depth"):
+            load_json_strict(deep_text)
+
+    def test_deep_validation_cli_json_returns_machine_readable_error(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            payload = valid_handoff_with_computed_value()
+            nested: object = "leaf"
+            for _ in range(300):
+                nested = [nested]
+            payload["result"]["computed_values"][0]["value"] = nested
+            path = Path(directory) / "deep.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, str(SCRIPTS / "validate_handoff.py"), "--input", str(path), "--json"],
+                check=False, capture_output=True, text=True,
+            )
+            self.assertEqual(1, result.returncode)
+            report = json.loads(result.stdout)
+            self.assertFalse(report["valid"])
+            self.assertIn("maximum JSON depth", " ".join(report["errors"]))
+
     def test_load_and_validate_rejects_artifact_symlink_escape(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -901,6 +1044,9 @@ class HandoffSchemaTests(unittest.TestCase):
             )
             self.assertEqual(0, migrated.returncode, migrated.stdout + migrated.stderr)
             self.assertEqual("2", json.loads(output_path.read_text(encoding="utf-8"))["schema_version"])
+            self.assertEqual(
+                "2", load_and_validate(output_path, kind="handoff")["schema_version"]
+            )
 
             refused = subprocess.run(
                 [

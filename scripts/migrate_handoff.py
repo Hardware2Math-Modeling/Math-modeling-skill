@@ -8,15 +8,22 @@ import json
 import os
 import sys
 import tempfile
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
-from handoff_schema import load_and_validate
+from handoff_schema import (
+    artifact_filesystem_errors,
+    load_and_validate,
+    strict_json_tree_errors,
+)
 from suite_validation import ensure_no_symlink_components
 
 
 def serialize_payload(payload: object, *, pretty: bool = False) -> str:
     """Serialize payload as strict UTF-8 JSON text."""
 
+    errors = strict_json_tree_errors(payload)
+    if errors:
+        raise ValueError("payload is not strict JSON:\n- " + "\n- ".join(errors))
     try:
         return json.dumps(
             payload,
@@ -39,10 +46,23 @@ def _canonical_output_path(raw_path: str) -> Path:
         components = components[1:]
     if any(component in {"", ".", ".."} for component in components):
         raise ValueError("output path must not contain empty, '.' or '..' components")
+    if "\\" in raw_path and any(
+        component in {".", ".."} for component in raw_path.split("\\")
+    ):
+        raise ValueError("output path must not contain '.' or '..' components")
+    for lexical in (PurePosixPath(raw_path), PureWindowsPath(raw_path)):
+        if any(component in {".", ".."} for component in lexical.parts):
+            raise ValueError("output path must not contain '.' or '..' components")
     return Path(raw_path)
 
 
 def _write_new_atomically(path: Path, content: str) -> None:
+    """Create a new file after a static symlink audit.
+
+    Concurrent replacement of an already-audited parent is outside this
+    cross-platform helper's threat boundary.
+    """
+
     path = _canonical_output_path(os.fspath(path))
     try:
         path = ensure_no_symlink_components(path, "output")
@@ -88,6 +108,12 @@ def main() -> int:
         if output_path.exists() or output_path.is_symlink():
             raise FileExistsError(f"output already exists: {output_path}")
         migrated = load_and_validate(args.input, kind="handoff", mode="legacy")
+        output_artifact_errors = artifact_filesystem_errors(migrated, output_path)
+        if output_artifact_errors:
+            raise ValueError(
+                "migrated handoff is invalid at output root:\n- "
+                + "\n- ".join(output_artifact_errors)
+            )
         content = serialize_payload(migrated, pretty=args.pretty)
         _write_new_atomically(output_path, content)
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as error:

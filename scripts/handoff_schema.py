@@ -42,6 +42,7 @@ RESULT_FIELDS = (
     "computed_values",
     "citations",
 )
+MAX_JSON_DEPTH = 256
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _ITERATION_RE = re.compile(r"^v[0-9]{3,}$")
 _QUESTION_RE = re.compile(r"^Q[1-9][0-9]*$")
@@ -52,6 +53,15 @@ _UTC_RE = re.compile(
 
 def _reject_json_constant(constant: str) -> object:
     raise ValueError(f"non-standard JSON constant {constant!r} is not allowed")
+
+
+def _reject_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate key {key!r} is not allowed")
+        result[key] = value
+    return result
 
 
 def load_json_strict(source: str | Path) -> object:
@@ -67,8 +77,18 @@ def load_json_strict(source: str | Path) -> object:
         label = "input text"
         text = source
     try:
-        return json.loads(text, parse_constant=_reject_json_constant)
-    except (json.JSONDecodeError, ValueError) as error:
+        payload = json.loads(
+            text,
+            parse_constant=_reject_json_constant,
+            object_pairs_hook=_reject_duplicate_keys,
+        )
+        tree_errors = strict_json_tree_errors(payload)
+        if tree_errors:
+            raise ValueError("invalid strict JSON tree: " + "; ".join(tree_errors))
+        return payload
+    except (json.JSONDecodeError, ValueError, RecursionError) as error:
+        if isinstance(error, RecursionError):
+            error = ValueError(f"JSON nesting exceeds maximum depth {MAX_JSON_DEPTH}")
         raise ValueError(f"unable to read valid JSON from {label}: {error}") from error
 
 
@@ -113,14 +133,17 @@ def _string_mapping_keys(
     return sorted(key for key in value if type(key) is str)
 
 
-def _strict_json_tree_errors(value: object) -> list[str]:
+def strict_json_tree_errors(value: object) -> list[str]:
     """Return deterministic errors for values outside the strict JSON tree."""
 
     errors: list[str] = []
     active_containers: set[int] = set()
 
-    def visit(item: object, path: str) -> None:
+    def visit(item: object, path: str, depth: int) -> None:
         label = path or "$"
+        if depth > MAX_JSON_DEPTH:
+            errors.append(f"{label} exceeds maximum JSON depth {MAX_JSON_DEPTH}")
+            return
         if type(item) is str or item is None or type(item) is bool or type(item) is int:
             return
         if type(item) is float:
@@ -135,7 +158,7 @@ def _strict_json_tree_errors(value: object) -> list[str]:
             active_containers.add(identity)
             try:
                 for index, child in enumerate(item):
-                    visit(child, f"{path}[{index}]")
+                    visit(child, f"{path}[{index}]", depth + 1)
             finally:
                 active_containers.remove(identity)
             return
@@ -147,7 +170,7 @@ def _strict_json_tree_errors(value: object) -> list[str]:
             active_containers.add(identity)
             try:
                 for key in _string_mapping_keys(item, path, errors):
-                    visit(item[key], _path(path, key))
+                    visit(item[key], _path(path, key), depth + 1)
             finally:
                 active_containers.remove(identity)
             return
@@ -156,7 +179,7 @@ def _strict_json_tree_errors(value: object) -> list[str]:
             f"(found {type(item).__name__})"
         )
 
-    visit(value, "")
+    visit(value, "", 0)
     return errors
 
 
@@ -230,11 +253,15 @@ def _evidence_value(
     path: str,
     errors: list[str],
     active_containers: set[int] | None = None,
+    depth: int = 0,
 ) -> None:
     """Validate one recursive evidence value against strict JSON types."""
 
     if active_containers is None:
         active_containers = set()
+    if depth > MAX_JSON_DEPTH:
+        errors.append(f"{path} exceeds maximum JSON depth {MAX_JSON_DEPTH}")
+        return
     if _is_string(value):
         if not value.strip():
             errors.append(f"{path} must not be an empty string")
@@ -254,7 +281,7 @@ def _evidence_value(
         try:
             for index, item in enumerate(value):
                 _evidence_value(
-                    item, f"{path}[{index}]", errors, active_containers
+                    item, f"{path}[{index}]", errors, active_containers, depth + 1
                 )
         finally:
             active_containers.remove(identity)
@@ -268,7 +295,7 @@ def _evidence_value(
         try:
             for key in _string_mapping_keys(value, path, errors):
                 _evidence_value(
-                    value[key], _path(path, key), errors, active_containers
+                    value[key], _path(path, key), errors, active_containers, depth + 1
                 )
         finally:
             active_containers.remove(identity)
@@ -281,7 +308,12 @@ def _safe_relative_path(value: object, path: str, errors: list[str]) -> None:
         errors.append(f"{path} must be a non-empty relative path")
         return
     assert isinstance(value, str)
-    if "\x00" in value or "\\" in value:
+    if (
+        "\\" in value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or "\u2028" in value
+        or "\u2029" in value
+    ):
         errors.append(f"{path} must use a safe project-relative path")
         return
     segments = value.split("/")
@@ -594,7 +626,7 @@ def validate_document(
     if mode == "legacy":
         if kind != "handoff":
             raise ValueError("legacy mode is only supported for handoff documents")
-        raw_errors = _strict_json_tree_errors(payload)
+        raw_errors = strict_json_tree_errors(payload)
         if raw_errors:
             return raw_errors
         if type(payload) is dict and payload.get("schema_version") == "1":
@@ -619,16 +651,19 @@ def _legacy_artifacts(value: object) -> list[dict[str, Any]]:
     if type(value) is not list:
         return []
     migrated: list[dict[str, Any]] = []
-    for item in value:
-        if type(item) is not dict:
-            continue
+    allowed = ("path", "kind", "description", "sha256")
+    for index, item in enumerate(value):
+        if type(item) is not dict or not item:
+            raise ValueError(f"artifacts[{index}] must be a non-empty object")
+        unknown = [key for key in item if key not in allowed]
+        if unknown:
+            raise ValueError(f"artifacts[{index}] contains unrecognized fields")
         artifact = {
             field: copy.deepcopy(item[field])
-            for field in ("path", "kind", "description", "sha256")
+            for field in allowed
             if field in item
         }
-        if artifact:
-            migrated.append(artifact)
+        migrated.append(artifact)
     return migrated
 
 
@@ -637,7 +672,7 @@ def migrate_payload(payload: dict[str, object]) -> dict[str, object]:
 
     if type(payload) is not dict:
         raise ValueError("legacy handoff must be an object")
-    raw_errors = _strict_json_tree_errors(payload)
+    raw_errors = strict_json_tree_errors(payload)
     if raw_errors:
         raise ValueError("legacy handoff is not strict JSON:\n- " + "\n- ".join(raw_errors))
     version = payload.get("schema_version")
@@ -675,10 +710,15 @@ def migrate_payload(payload: dict[str, object]) -> dict[str, object]:
     )
     artifacts = _legacy_artifacts(payload.get("artifacts"))
     warnings = _copy_array(legacy_quality.get("warnings"))
-    has_hash_evidence = bool(artifacts) and all(
-        _is_string(artifact.get("sha256"))
+    raw_artifacts = payload.get("artifacts")
+    has_hash_evidence = bool(raw_artifacts) and type(raw_artifacts) is list and all(
+        type(artifact) is dict
+        and _is_nonempty_string(artifact.get("path"))
+        and _is_nonempty_string(artifact.get("kind"))
+        and _is_nonempty_string(artifact.get("description"))
+        and _is_string(artifact.get("sha256"))
         and _HASH_RE.fullmatch(artifact["sha256"]) is not None
-        for artifact in artifacts
+        for artifact in raw_artifacts
     )
     if validation_status == "pass" and not has_hash_evidence:
         validation_status = "stale"
@@ -756,7 +796,7 @@ def migrate_payload(payload: dict[str, object]) -> dict[str, object]:
     return migrated
 
 
-def _artifact_filesystem_errors(
+def artifact_filesystem_errors(
     payload: dict[str, object], document_path: Path
 ) -> list[str]:
     """Reject artifact paths whose existing symlinks resolve outside the document root."""
@@ -799,7 +839,7 @@ def load_and_validate(
         else payload
     )
     if kind == "handoff":
-        filesystem_errors = _artifact_filesystem_errors(result, path)
+        filesystem_errors = artifact_filesystem_errors(result, path)
         if filesystem_errors:
             raise ValueError(
                 f"invalid {kind} document:\n- " + "\n- ".join(filesystem_errors)
