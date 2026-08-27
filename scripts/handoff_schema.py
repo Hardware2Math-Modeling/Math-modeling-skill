@@ -596,6 +596,34 @@ def migrate_payload(payload: dict[str, object]) -> dict[str, object]:
     return migrated
 
 
+def _artifact_filesystem_errors(
+    payload: dict[str, object], document_path: Path
+) -> list[str]:
+    """Reject artifact paths whose existing symlinks resolve outside the document root."""
+
+    errors: list[str] = []
+    artifacts = payload.get("artifacts")
+    if type(artifacts) is not list:
+        return errors
+    try:
+        root = document_path.parent.resolve(strict=True)
+    except OSError as error:
+        return [f"artifacts: unable to resolve project root: {error}"]
+    for index, artifact in enumerate(artifacts):
+        if type(artifact) is not dict or not _is_nonempty_string(artifact.get("path")):
+            continue
+        relative = artifact["path"]
+        assert isinstance(relative, str)
+        try:
+            resolved = root.joinpath(relative).resolve(strict=False)
+        except (OSError, RuntimeError) as error:
+            errors.append(f"artifacts[{index}].path cannot be resolved safely: {error}")
+            continue
+        if not resolved.is_relative_to(root):
+            errors.append(f"artifacts[{index}].path escapes the project root through a symlink")
+    return errors
+
+
 def load_and_validate(
     path: Path, *, kind: str, mode: str = "runtime"
 ) -> dict[str, object]:
@@ -608,6 +636,15 @@ def load_and_validate(
     errors = validate_document(payload, kind=kind, mode=mode)
     if errors:
         raise ValueError(f"invalid {kind} document:\n- " + "\n- ".join(errors))
-    if mode == "legacy" and payload.get("schema_version") == "1":
-        return migrate_payload(payload)
-    return payload
+    result = (
+        migrate_payload(payload)
+        if mode == "legacy" and payload.get("schema_version") == "1"
+        else payload
+    )
+    if kind == "handoff":
+        filesystem_errors = _artifact_filesystem_errors(result, path)
+        if filesystem_errors:
+            raise ValueError(
+                f"invalid {kind} document:\n- " + "\n- ".join(filesystem_errors)
+            )
+    return result

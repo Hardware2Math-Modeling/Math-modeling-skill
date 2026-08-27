@@ -5,10 +5,9 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
-from handoff_schema import validate_document
+from handoff_schema import load_and_validate
 
 
 def main() -> int:
@@ -20,12 +19,17 @@ def main() -> int:
     parser.add_argument("--json", action="store_true", help="Print machine-readable output.")
     args = parser.parse_args()
     try:
-        payload = json.loads(args.input.read_text(encoding="utf-8"))
-        errors = validate_document(payload, kind="handoff", mode=args.mode)
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+        load_and_validate(args.input, kind="handoff", mode=args.mode)
+        errors: list[str] = []
+    except ValueError as error:
         errors = [f"input: {error}"]
     if args.json:
-        print(json.dumps({"valid": not errors, "kind": "handoff", "errors": errors}, ensure_ascii=False))
+        print(
+            json.dumps(
+                {"valid": not errors, "kind": "handoff", "errors": errors},
+                ensure_ascii=False,
+            )
+        )
     elif errors:
         print("handoff invalid:")
         for error in errors:

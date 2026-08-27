@@ -148,6 +148,25 @@ class HandoffSchemaTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "state.current_stage"):
                 load_and_validate(invalid_path, kind="handoff")
 
+    def test_load_and_validate_rejects_artifact_symlink_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            project = base / "project"
+            external = base / "external"
+            project.mkdir()
+            external.mkdir()
+            external.joinpath("result.json").write_text("{}", encoding="utf-8")
+            try:
+                project.joinpath("artifacts").symlink_to(external, target_is_directory=True)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+            payload = valid_handoff()
+            handoff = project / "handoff.json"
+            handoff.write_text(json.dumps(payload), encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, r"artifacts\[0\]\.path.*symlink"):
+                load_and_validate(handoff, kind="handoff")
+
     def test_all_versioned_schema_documents_are_strict_json_objects(self) -> None:
         for kind in ("handoff", "iteration", "manifest", "gate"):
             with self.subTest(kind=kind):
