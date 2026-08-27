@@ -11,12 +11,18 @@ import shutil
 import stat
 import sys
 from datetime import datetime, timezone
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from typing import Sequence
 from uuid import uuid4
 
 from handoff_schema import load_and_validate, load_json_strict, validate_document
-from manifest import atomic_write_json, relative_regular_files, sha256_file, utc_now
+from manifest import (
+    atomic_write_json,
+    relative_regular_files,
+    safe_relative_path,
+    sha256_file,
+    utc_now,
+)
 from suite_validation import ensure_no_symlink_components
 
 
@@ -77,26 +83,22 @@ def _regular_file(path: Path, label: str) -> Path:
     return safe
 
 
-def _safe_relative_text(value: str, label: str) -> str:
-    if type(value) is not str or not value:
-        raise ValueError(f"{label} must be a non-empty relative path")
-    if (
-        "\x00" in value
-        or "\\" in value
-        or any(ord(character) < 32 or ord(character) == 127 for character in value)
-    ):
-        raise ValueError(f"{label} must be a safe project-relative path")
-    posix = PurePosixPath(value)
-    windows = PureWindowsPath(value)
-    segments = value.split("/")
-    if (
-        posix.is_absolute()
-        or windows.is_absolute()
-        or bool(windows.drive)
-        or any(segment in ("", ".", "..") for segment in segments)
-    ):
-        raise ValueError(f"{label} must be a safe project-relative path")
-    return value
+def _output_file(path: Path, label: str) -> Path:
+    """Preflight an output that may be absent or an existing regular file."""
+
+    safe = _absolute_path(path, label)
+    _directory(safe.parent, f"{label} parent")
+    try:
+        mode = safe.lstat().st_mode
+    except FileNotFoundError:
+        return safe
+    except OSError as error:
+        raise ValueError(f"{label} cannot be inspected: {safe}") from error
+    if not stat.S_ISREG(mode):
+        raise ValueError(
+            f"{label} must be absent or an existing regular non-symlink file: {safe}"
+        )
+    return safe
 
 
 def _validate_payload(payload: object, kind: str) -> dict[str, object]:
@@ -203,6 +205,11 @@ def init_project(
     if type(competition) is not str or not competition.strip():
         raise ValueError("competition must be a non-empty string")
     template = _regular_file(template_path, "template path") if template_path is not None else None
+    template_name = (
+        safe_relative_path(template.name, "template basename")
+        if template is not None
+        else None
+    )
 
     input_files = relative_regular_files(source_input)
     if not input_files:
@@ -220,9 +227,10 @@ def init_project(
         _create_iteration_layout(iteration)
 
         if template is not None:
+            assert template_name is not None
             template_dir = iteration / "paper/template-source"
             template_dir.mkdir()
-            shutil.copyfile(template, template_dir / template.name, follow_symlinks=False)
+            shutil.copyfile(template, template_dir / template_name, follow_symlinks=False)
 
         manifest = _input_manifest(project, copied_files, created_at)
         _write_validated_json(iteration / "manifests/input_manifest.json", manifest, "manifest")
@@ -231,8 +239,8 @@ def init_project(
             "competition": competition.strip(),
             "python_executable": os.fspath(python),
             "template_path": (
-                f"iterations/v001/paper/template-source/{template.name}"
-                if template is not None
+                f"iterations/v001/paper/template-source/{template_name.as_posix()}"
+                if template_name is not None
                 else None
             ),
             "created_at": created_at,
@@ -258,7 +266,8 @@ def load_current(project_root: Path) -> dict[str, object]:
     """Load and validate the current pointer."""
 
     project = _directory(project_root, "project root")
-    current = load_and_validate(project / "current.json", kind="iteration")
+    current_path = _regular_file(project / "current.json", "current pointer")
+    current = load_and_validate(current_path, kind="iteration")
     iteration = _directory(
         project / "iterations" / str(current["active_iteration"]),
         "active iteration",
@@ -377,7 +386,7 @@ def record_gate(
     *,
     gate_id: str,
     status: str,
-    confirmer: str,
+    confirmer: str | None,
     artifact_hashes: Sequence[str],
     note: str,
 ) -> dict[str, object]:
@@ -389,8 +398,8 @@ def record_gate(
         raise ValueError(f"unknown gate id: {gate_id!r}")
     if type(status) is not str or status not in GATE_STATUSES:
         raise ValueError(f"unknown gate status: {status!r}")
-    if type(confirmer) is not str:
-        raise ValueError("confirmer must be a string")
+    if confirmer is not None and type(confirmer) is not str:
+        raise ValueError("confirmer must be a string or null")
     if type(note) is not str:
         raise ValueError("note must be a string")
     if type(artifact_hashes) not in (list, tuple):
@@ -400,7 +409,9 @@ def record_gate(
         raise ValueError("artifact hashes must contain SHA-256 digests")
     if len(set(hashes)) != len(hashes):
         raise ValueError("artifact hashes must not contain duplicates")
-    if status == "confirmed" and (not confirmer.strip() or not hashes):
+    if status == "confirmed" and (
+        confirmer is None or not confirmer.strip() or not hashes
+    ):
         raise ValueError("confirmed gates require a confirmer and artifact hashes")
 
     timestamp = utc_now()
@@ -408,16 +419,18 @@ def record_gate(
         "schema_version": SCHEMA_VERSION,
         "gate_id": gate_id,
         "status": status,
-        "confirmed_by": confirmer.strip() or None,
-        "confirmed_at": timestamp if status == "confirmed" else None,
         "artifact_hashes": hashes,
         "notes": note,
         "rollback_stage": ROLLBACK_STAGES[gate_id] if status == "rejected" else None,
     }
+    if status == "confirmed":
+        assert confirmer is not None
+        record.update({"confirmed_by": confirmer.strip(), "confirmed_at": timestamp})
     _validate_payload(record, "gate")
 
     qa = _directory(project / "qa", "QA directory")
-    report_path = qa / "gates.json"
+    report_path = _output_file(qa / "gates.json", "gate report output")
+    current_path = _output_file(project / "current.json", "current pointer output")
     if report_path.exists() or report_path.is_symlink():
         report = load_json_strict(report_path)
         if type(report) is not dict or set(report) != {"schema_version", "records"}:
@@ -434,16 +447,18 @@ def record_gate(
     else:
         updated_report = {"schema_version": SCHEMA_VERSION, "records": [record]}
 
-    atomic_write_json(report_path, updated_report)
     gates = dict(current["gates"])
     gates[gate_id] = status
     updated_current = dict(current)
     updated_current.update({"gates": gates, "updated_at": timestamp})
-    _write_validated_json(project / "current.json", updated_current, "iteration")
+    _validate_payload(updated_current, "iteration")
+
+    atomic_write_json(report_path, updated_report)
+    _write_validated_json(current_path, updated_current, "iteration")
     return updated_report
 
 
-def _write_staleness_markdown(path: Path, report: dict[str, object]) -> None:
+def _staleness_markdown(report: dict[str, object]) -> str:
     changed = report["changed_paths"]
     invalidated = report["invalidated"]
     assert type(changed) is list and type(invalidated) is dict
@@ -465,11 +480,15 @@ def _write_staleness_markdown(path: Path, report: dict[str, object]) -> None:
         assert type(artifacts) is list
         lines.append(f"- {question}: {', '.join(artifacts)}")
     lines.append("")
-    safe = _absolute_path(path, "staleness report output")
-    parent = _directory(safe.parent, "staleness report parent")
+    return "\n".join(lines)
+
+
+def _write_staleness_markdown(path: Path, content: str) -> None:
+    safe = _output_file(path, "staleness Markdown output")
+    parent = safe.parent
     temporary = parent / f".{safe.name}.{uuid4().hex}.tmp"
     try:
-        temporary.write_text("\n".join(lines), encoding="utf-8")
+        temporary.write_text(content, encoding="utf-8")
         os.replace(temporary, safe)
     finally:
         try:
@@ -490,7 +509,12 @@ def mark_stale(
     current = load_current(project)
     if type(changed_paths) not in (list, tuple) or not changed_paths:
         raise ValueError("changed paths must be a non-empty sequence")
-    paths = sorted({_safe_relative_text(value, "changed path") for value in changed_paths})
+    paths = sorted(
+        {
+            safe_relative_path(value, "changed path").as_posix()
+            for value in changed_paths
+        }
+    )
     questions = _normalized_questions(question_ids, current)
     timestamp = utc_now()
     report: dict[str, object] = {
@@ -500,9 +524,7 @@ def mark_stale(
         "changed_paths": paths,
         "invalidated": {question: list(STALE_ARTIFACTS) for question in questions},
     }
-    qa = _directory(project / "qa", "QA directory")
-    atomic_write_json(qa / "staleness.json", report)
-    _write_staleness_markdown(qa / "staleness.md", report)
+    markdown = _staleness_markdown(report)
 
     gates = {
         gate: ("stale" if status == "confirmed" else status)
@@ -512,7 +534,16 @@ def mark_stale(
     updated_current.update(
         {"gates": gates, "status": "stale", "updated_at": timestamp}
     )
-    _write_validated_json(project / "current.json", updated_current, "iteration")
+    _validate_payload(updated_current, "iteration")
+
+    qa = _directory(project / "qa", "QA directory")
+    json_path = _output_file(qa / "staleness.json", "staleness JSON output")
+    markdown_path = _output_file(qa / "staleness.md", "staleness Markdown output")
+    current_path = _output_file(project / "current.json", "current pointer output")
+
+    atomic_write_json(json_path, report)
+    _write_staleness_markdown(markdown_path, markdown)
+    _write_validated_json(current_path, updated_current, "iteration")
     return report
 
 
@@ -543,7 +574,7 @@ def _parser() -> argparse.ArgumentParser:
     gate.add_argument("project_root", type=_absolute_cli_path)
     gate.add_argument("--gate-id", required=True)
     gate.add_argument("--status", required=True)
-    gate.add_argument("--confirmer", required=True)
+    gate.add_argument("--confirmer")
     gate.add_argument("--artifact-hash", action="append", default=[])
     gate.add_argument("--note", default="")
 

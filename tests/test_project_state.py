@@ -125,6 +125,17 @@ class ProjectStateTests(unittest.TestCase):
                 template_path=None,
             )
 
+    def test_init_rejects_unsafe_template_basename(self) -> None:
+        template = self.temp_path / "template\u2028.tex"
+        template.write_text("template", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            init_project(
+                self.temp_path / "unsafe-template-project",
+                python_executable=Path(sys.executable).resolve(),
+                input_dir=self.input_dir,
+                template_path=template,
+            )
+
     def test_new_iteration_never_overwrites_parent_and_preserves_unaffected_question(self) -> None:
         parent_file = self.project / "iterations/v001/results/evidence.txt"
         parent_file.write_text("parent evidence", encoding="utf-8")
@@ -178,6 +189,28 @@ class ProjectStateTests(unittest.TestCase):
         self.assertEqual("reviewer", report["records"][0]["confirmed_by"])
         self.assertEqual([digest], report["records"][0]["artifact_hashes"])
         self.assertEqual("accepted after review", report["records"][0]["notes"])
+
+    def test_nonconfirmed_gate_records_omit_confirmation_evidence(self) -> None:
+        pending = record_gate(
+            self.project,
+            gate_id="gate1",
+            status="pending",
+            confirmer="unused reviewer",
+            artifact_hashes=[],
+            note="awaiting review",
+        )["records"][-1]
+        rejected = record_gate(
+            self.project,
+            gate_id="gate2",
+            status="rejected",
+            confirmer="unused reviewer",
+            artifact_hashes=[],
+            note="return for revision",
+        )["records"][-1]
+        for record in (pending, rejected):
+            with self.subTest(status=record["status"]):
+                self.assertNotIn("confirmed_by", record)
+                self.assertNotIn("confirmed_at", record)
 
     def test_record_gate_rejects_unknown_gate_and_status(self) -> None:
         for gate_id, status in (("gate4", "pending"), ("gate1", "approved")):
@@ -237,6 +270,45 @@ class ProjectStateTests(unittest.TestCase):
             )
         self.assertFalse((outside / "gates.json").exists())
 
+    def test_record_gate_rejects_final_gate_report_symlink_before_parsing(self) -> None:
+        malformed = self.project / "qa/malformed-gates.json"
+        malformed.write_text("not JSON", encoding="utf-8")
+        report_path = self.project / "qa/gates.json"
+        try:
+            report_path.symlink_to(malformed)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are not available")
+        with self.assertRaisesRegex(ValueError, "symbolic link"):
+            record_gate(
+                self.project,
+                gate_id="gate1",
+                status="pending",
+                confirmer="",
+                artifact_hashes=[],
+                note="must reject the link before reading its target",
+            )
+
+    def test_record_gate_preflights_current_before_writing_gate_report(self) -> None:
+        current_path = self.project / "current.json"
+        target = self.project / "current-target.json"
+        current_path.replace(target)
+        try:
+            current_path.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are not available")
+        original = target.read_bytes()
+        with self.assertRaises(ValueError):
+            record_gate(
+                self.project,
+                gate_id="gate1",
+                status="pending",
+                confirmer="",
+                artifact_hashes=[],
+                note="must not partially update",
+            )
+        self.assertFalse((self.project / "qa/gates.json").exists())
+        self.assertEqual(original, target.read_bytes())
+
     def test_input_hash_change_marks_dependent_run_figure_validation_and_paper_stale(self) -> None:
         evidence = self.project / "iterations/v001/results/old-result.txt"
         evidence.write_text("keep me", encoding="utf-8")
@@ -257,16 +329,71 @@ class ProjectStateTests(unittest.TestCase):
         self.assertEqual("keep me", evidence.read_text(encoding="utf-8"))
 
     def test_mark_stale_rejects_unsafe_changed_path(self) -> None:
-        for unsafe in ("/tmp/data.csv", "../data.csv", "input/../data.csv"):
+        for unsafe in (
+            "/tmp/data.csv",
+            "../data.csv",
+            "input/../data.csv",
+            "input\\data.csv",
+            "input//data.csv",
+            "input/./data.csv",
+            "input/data.csv/",
+            "input/line\u2028separator.csv",
+            "input/paragraph\u2029separator.csv",
+        ):
             with self.subTest(path=unsafe):
                 with self.assertRaises(ValueError):
                     mark_stale(self.project, changed_paths=[unsafe], question_ids=["Q1"])
+
+    @unittest.skipUnless(hasattr(os, "mkfifo"), "FIFO creation is unavailable")
+    def test_mark_stale_preflights_markdown_before_writing_any_output(self) -> None:
+        markdown_path = self.project / "qa/staleness.md"
+        os.mkfifo(markdown_path)
+        current_path = self.project / "current.json"
+        original = current_path.read_bytes()
+        with self.assertRaises(ValueError):
+            mark_stale(
+                self.project,
+                changed_paths=["input/data.csv"],
+                question_ids=["Q1"],
+            )
+        self.assertFalse((self.project / "qa/staleness.json").exists())
+        self.assertEqual(original, current_path.read_bytes())
+
+    def test_mark_stale_preflights_current_before_writing_reports(self) -> None:
+        current_path = self.project / "current.json"
+        target = self.project / "current-target.json"
+        current_path.replace(target)
+        try:
+            current_path.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are not available")
+        original = target.read_bytes()
+        with self.assertRaises(ValueError):
+            mark_stale(
+                self.project,
+                changed_paths=["input/data.csv"],
+                question_ids=["Q1"],
+            )
+        self.assertFalse((self.project / "qa/staleness.json").exists())
+        self.assertFalse((self.project / "qa/staleness.md").exists())
+        self.assertEqual(original, target.read_bytes())
 
     def test_load_current_rejects_duplicate_json_keys(self) -> None:
         (self.project / "current.json").write_text(
             '{"schema_version":"2","schema_version":"2"}\n',
             encoding="utf-8",
         )
+        with self.assertRaises(ValueError):
+            load_current(self.project)
+
+    def test_load_current_rejects_final_current_symlink(self) -> None:
+        current_path = self.project / "current.json"
+        target = self.project / "current-target.json"
+        current_path.replace(target)
+        try:
+            current_path.symlink_to(target)
+        except (OSError, NotImplementedError):
+            self.skipTest("symlinks are not available")
         with self.assertRaises(ValueError):
             load_current(self.project)
 
@@ -332,6 +459,47 @@ class ProjectStateTests(unittest.TestCase):
                 self.assertEqual(0, result.returncode, result.stderr)
                 self.assertTrue(expected_path.is_absolute())
                 self.assertEqual(f"{expected_path}\n", result.stdout)
+
+    def test_cli_pending_gate_does_not_require_confirmer(self) -> None:
+        result = subprocess.run(
+            [
+                str(Path(sys.executable).resolve()),
+                str(SCRIPTS / "project_state.py"),
+                "gate",
+                str(self.project),
+                "--gate-id",
+                "gate1",
+                "--status",
+                "pending",
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+
+    def test_cli_confirmed_gate_requires_confirmer(self) -> None:
+        result = subprocess.run(
+            [
+                str(Path(sys.executable).resolve()),
+                str(SCRIPTS / "project_state.py"),
+                "gate",
+                str(self.project),
+                "--gate-id",
+                "gate1",
+                "--status",
+                "confirmed",
+                "--artifact-hash",
+                "a" * 64,
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("confirmed gates require a confirmer", result.stderr)
 
 
 if __name__ == "__main__":

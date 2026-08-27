@@ -555,29 +555,36 @@ def _validate_manifest(payload: object, errors: list[str]) -> None:
 
 
 def _validate_gate(payload: object, errors: list[str]) -> None:
-    fields = (
+    required_fields = (
         "schema_version",
         "gate_id",
         "status",
-        "confirmed_by",
-        "confirmed_at",
         "artifact_hashes",
         "notes",
         "rollback_stage",
     )
-    root = _object(payload, path="", required=fields, allowed=fields, errors=errors)
+    allowed_fields = (*required_fields, "confirmed_by", "confirmed_at")
+    root = _object(
+        payload,
+        path="",
+        required=required_fields,
+        allowed=allowed_fields,
+        errors=errors,
+    )
     if root is None:
         return
     if root.get("schema_version") != "2" or not _is_string(root.get("schema_version")):
         errors.append('schema_version must be exactly the string "2"')
     _enum(root.get("gate_id"), ("gate1", "gate2", "gate3"), "gate_id", errors)
     _enum(root.get("status"), ("pending", "confirmed", "rejected"), "status", errors)
+    has_confirmer = "confirmed_by" in root
+    has_confirmed_at = "confirmed_at" in root
     confirmer = root.get("confirmed_by")
     confirmed_at = root.get("confirmed_at")
-    if confirmer is not None:
+    if has_confirmer:
         _nonempty_string(confirmer, "confirmed_by", errors)
-    if confirmed_at is not None and not _is_utc_timestamp(confirmed_at):
-        errors.append("confirmed_at must be null or a UTC timestamp ending in Z")
+    if has_confirmed_at and not _is_utc_timestamp(confirmed_at):
+        errors.append("confirmed_at must be a UTC timestamp ending in Z")
     hashes = root.get("artifact_hashes")
     if type(hashes) is not list:
         errors.append("artifact_hashes must be an array")
@@ -597,12 +604,17 @@ def _validate_gate(payload: object, errors: list[str]) -> None:
         _enum(rollback, STAGES, "rollback_stage", errors)
     status = root.get("status")
     if status == "confirmed":
-        if confirmer is None:
+        if not has_confirmer:
             errors.append("confirmed_by is required when status is confirmed")
-        if confirmed_at is None:
+        if not has_confirmed_at:
             errors.append("confirmed_at is required when status is confirmed")
         if type(hashes) is list and not hashes:
             errors.append("artifact_hashes must not be empty when status is confirmed")
+    else:
+        if has_confirmer:
+            errors.append("confirmed_by must not be present unless status is confirmed")
+        if has_confirmed_at:
+            errors.append("confirmed_at must not be present unless status is confirmed")
     if status == "rejected" and rollback is None:
         errors.append("rollback_stage is required when status is rejected")
 

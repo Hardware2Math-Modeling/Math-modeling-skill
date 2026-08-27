@@ -62,6 +62,17 @@ class ManifestTests(unittest.TestCase):
             list(relative_regular_files(self.root)),
         )
 
+    def test_relative_regular_files_rejects_unsafe_relative_names(self) -> None:
+        for name in ("bad\\name.txt", "bad\nname.txt", "bad\u2028name.txt", "bad\u2029name.txt"):
+            with self.subTest(name=repr(name)):
+                unsafe = self.root / name
+                unsafe.write_text("unsafe", encoding="utf-8")
+                try:
+                    with self.assertRaises(ValueError):
+                        relative_regular_files(self.root)
+                finally:
+                    unsafe.unlink()
+
     def test_hashing_rejects_symlink_components(self) -> None:
         link = self.root / "linked.txt"
         try:

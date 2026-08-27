@@ -69,8 +69,6 @@ def valid_pending_gate() -> dict[str, object]:
         "schema_version": "2",
         "gate_id": "gate1",
         "status": "pending",
-        "confirmed_by": None,
-        "confirmed_at": None,
         "artifact_hashes": [],
         "notes": "",
         "rollback_stage": None,
@@ -473,6 +471,19 @@ class HandoffSchemaTests(unittest.TestCase):
     def test_pending_gate_needs_no_confirmation_evidence(self) -> None:
         self.assertEqual([], validate_document(valid_pending_gate(), kind="gate"))
 
+    def test_nonconfirmed_gates_reject_confirmation_evidence(self) -> None:
+        for status in ("pending", "rejected"):
+            with self.subTest(status=status):
+                payload = valid_pending_gate()
+                payload["status"] = status
+                if status == "rejected":
+                    payload["rollback_stage"] = "problem-analysis"
+                payload["confirmed_by"] = "reviewer"
+                payload["confirmed_at"] = "2026-08-27T00:00:00Z"
+                errors = validate_document(payload, kind="gate")
+                self.assertTrue(any("confirmed_by" in error for error in errors))
+                self.assertTrue(any("confirmed_at" in error for error in errors))
+
     def test_gate_rejects_duplicate_artifact_hashes(self) -> None:
         payload = valid_pending_gate()
         digest = "a" * 64
@@ -487,9 +498,18 @@ class HandoffSchemaTests(unittest.TestCase):
             "confirmed", confirmed["if"]["properties"]["status"]["const"]
         )
         confirmed_properties = confirmed["then"]["properties"]
+        self.assertEqual(
+            ["confirmed_by", "confirmed_at"],
+            confirmed["then"]["required"],
+        )
         self.assertEqual("string", confirmed_properties["confirmed_by"]["type"])
         self.assertEqual("string", confirmed_properties["confirmed_at"]["type"])
         self.assertEqual(1, confirmed_properties["artifact_hashes"]["minItems"])
+        forbidden = confirmed["else"]["not"]["anyOf"]
+        self.assertEqual(
+            [{"required": ["confirmed_by"]}, {"required": ["confirmed_at"]}],
+            forbidden,
+        )
         self.assertEqual(
             "rejected", rejected["if"]["properties"]["status"]["const"]
         )

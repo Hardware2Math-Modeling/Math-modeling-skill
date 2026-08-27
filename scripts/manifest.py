@@ -49,13 +49,20 @@ def _directory(path: Path, label: str) -> Path:
     return safe
 
 
-def _safe_relative(path: Path, label: str) -> Path:
-    raw = os.fspath(path)
+def safe_relative_path(path: str | os.PathLike[str], label: str) -> Path:
+    """Return one canonical safe relative path shared by state operations."""
+
+    try:
+        raw = os.fspath(path)
+    except TypeError as error:
+        raise ValueError(f"{label} must be a safe relative path") from error
     if (
-        not raw
-        or "\x00" in raw
+        type(raw) is not str
+        or not raw
         or "\\" in raw
         or any(ord(character) < 32 or ord(character) == 127 for character in raw)
+        or "\u2028" in raw
+        or "\u2029" in raw
     ):
         raise ValueError(f"{label} must be a safe relative path")
     posix = PurePosixPath(raw)
@@ -66,6 +73,7 @@ def _safe_relative(path: Path, label: str) -> Path:
         or windows.is_absolute()
         or bool(windows.drive)
         or any(segment in ("", ".", "..") for segment in segments)
+        or PurePosixPath(*segments).as_posix() != raw
     ):
         raise ValueError(f"{label} must be a safe relative path")
     return Path(*segments)
@@ -92,7 +100,7 @@ def sha256_paths(root: Path, relative_paths: Iterable[Path]) -> dict[str, str]:
     normalized: list[Path] = []
     seen: set[str] = set()
     for index, relative in enumerate(relative_paths):
-        item = _safe_relative(Path(relative), f"artifact path {index}")
+        item = safe_relative_path(relative, f"artifact path {index}")
         key = item.as_posix()
         if key in seen:
             raise ValueError(f"duplicate artifact path: {key}")
@@ -171,7 +179,11 @@ def relative_regular_files(root: Path) -> Sequence[Path]:
         except OSError as error:
             raise ValueError(f"unable to inspect file tree: {directory}") from error
         for entry in entries:
-            relative = relative_parent / entry.name
+            name = safe_relative_path(entry.name, "file tree entry name")
+            relative = safe_relative_path(
+                (relative_parent / name).as_posix(),
+                "file tree relative path",
+            )
             try:
                 mode = entry.stat(follow_symlinks=False).st_mode
             except OSError as error:
