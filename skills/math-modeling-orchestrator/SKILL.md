@@ -20,12 +20,15 @@ Before routing, read [references/workflow.json](references/workflow.json) for th
 
 Invoke exactly the stage whose entry condition is satisfied:
 
-1. Invoke `$math-modeling-problem-analysis` first for every new problem; resume or skip only when an existing handoff records that stage complete. Use its result to make objectives, constraints, variables, metrics, and units explicit before later stages.
-2. Invoke `$math-modeling-data-analysis` when relevant observational or supplied data exists and the problem definition is stable enough to assess it. Data analysis may be skipped only with a recorded reason when no relevant data work is needed.
-3. Invoke `$math-modeling-model-construction` when the analyzed problem and any relevant data implications are ready to be expressed as candidate mathematical formulations.
-4. Invoke `$math-modeling-model-solving` only when an accepted model, its parameters or parameter sources, domains, constraints, and solution interface are explicit.
-5. Invoke `$math-modeling-validation` when solver results and reproducible evidence are available for the prespecified checks.
-6. Invoke `$math-modeling-paper-writing` only after validation explicitly passes and the user requests a paper or revision of validated material. Otherwise finish after validation without entering this optional stage.
+1. Invoke `$math-modeling-preflight` first for every new problem; resume or skip only when an existing handoff records that stage complete. Verify inputs, project paths, requested deliverables, and environment readiness before analysis.
+2. Invoke `$math-modeling-problem-analysis` after preflight to make objectives, constraints, variables, metrics, and units explicit before later stages.
+3. Invoke `$math-modeling-data-analysis` when relevant observational or supplied data exists and the problem definition is stable enough to assess it. Data analysis may be skipped only with a recorded reason when no relevant data work is needed.
+4. Invoke `$math-modeling-model-construction` when the analyzed problem and any relevant data implications are ready to be expressed as candidate mathematical formulations.
+5. Invoke `$math-modeling-model-solving` only when an accepted model, its parameters or parameter sources, domains, constraints, and solution interface are explicit.
+6. Invoke `$math-modeling-visualization` when results require figures or diagnostics. Skip only with the explicit no-figure guard; a figure claim requires this stage before validation.
+7. Invoke `$math-modeling-validation` when solver results and reproducible evidence are available for the prespecified checks.
+8. Invoke `$math-modeling-paper-writing` only after validation explicitly passes and the user requests a paper or revision of validated material. Otherwise finish after validation without entering this optional stage.
+9. Invoke `$math-modeling-paper-production` only when paper writing is complete and the user requested a paper; production must satisfy its paper-request and paper-writing guard before completion.
 
 After each return, merge the updated handoff without discarding `task.statement`, `task.objectives`, `task.constraints`, equations, variable definitions, units, provenance, assumptions, accepted or rejected model alternatives, artifact paths, failed runs, `quality.warnings`, `quality.confidence`, or validation evidence. Treat `next.rationale` and `next.alternatives` as recommendations, then apply the workflow guards yourself.
 

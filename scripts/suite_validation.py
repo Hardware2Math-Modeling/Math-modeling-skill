@@ -13,15 +13,20 @@ from urllib.parse import urlparse
 
 PLUGIN_NAME = "math-modeling-suite"
 ORCHESTRATOR_SKILL = "math-modeling-orchestrator"
-STAGE_SKILLS = (
+WORKFLOW_STAGE_SKILLS = (
+    "math-modeling-preflight",
     "math-modeling-problem-analysis",
     "math-modeling-data-analysis",
     "math-modeling-model-construction",
     "math-modeling-model-solving",
+    "math-modeling-visualization",
     "math-modeling-validation",
     "math-modeling-paper-writing",
+    "math-modeling-paper-production",
 )
-ALL_SKILLS = (ORCHESTRATOR_SKILL, *STAGE_SKILLS)
+SUPPORT_SKILLS = ("math-modeling-method-library",)
+STAGE_SKILLS = WORKFLOW_STAGE_SKILLS
+ALL_SKILLS = (ORCHESTRATOR_SKILL, *WORKFLOW_STAGE_SKILLS, *SUPPORT_SKILLS)
 HANDOFF_REQUIRED_FIELDS = ("schema_version", "state", "result", "next")
 HANDOFF_STATUSES = ("pending", "in_progress", "complete", "needs_revision", "skipped")
 HANDOFF_STATE_FIELDS = (
@@ -130,10 +135,12 @@ _INTERFACE_KEYS = {
     "screenshots",
 }
 _EXPECTED_TRANSITIONS = {
+    "preflight": ["problem-analysis"],
     "problem-analysis": ["data-analysis", "model-construction"],
     "data-analysis": ["model-construction"],
     "model-construction": ["model-solving"],
-    "model-solving": ["validation"],
+    "model-solving": ["visualization", "validation"],
+    "visualization": ["validation"],
     "validation-pass": ["paper-writing", "complete"],
     "validation-fail": [
         "problem-analysis",
@@ -141,7 +148,8 @@ _EXPECTED_TRANSITIONS = {
         "model-construction",
         "model-solving",
     ],
-    "paper-writing": ["complete"],
+    "paper-writing": ["paper-production"],
+    "paper-production": ["complete"],
 }
 
 _WORKFLOW_KEYS = {
@@ -153,7 +161,26 @@ _WORKFLOW_KEYS = {
     "handoff",
 }
 _WORKFLOW_STAGE_KEYS = {"id", "skill", "optional"}
-_WORKFLOW_GUARD_KEYS = {"data-analysis-skip", "paper-writing"}
+_EXPECTED_GUARDS = {
+    "data-analysis-skip": {"allowed": True, "requires_reason": True},
+    "visualization-skip": {
+        "allowed": True,
+        "requires_reason": True,
+        "requires_no_figure_claim": True,
+    },
+    "paper-writing": {
+        "optional": True,
+        "requires_validation_pass": True,
+        "requires_gate3": True,
+        "requires_no_invalidated_inputs": True,
+    },
+    "paper-production": {
+        "optional": True,
+        "requires_paper_request": True,
+        "requires_paper_writing": True,
+    },
+}
+_WORKFLOW_GUARD_KEYS = set(_EXPECTED_GUARDS)
 _WORKFLOW_HANDOFF_KEYS = {
     "required_fields",
     "statuses",
@@ -649,9 +676,16 @@ def _validate_skills(root: Path, errors: list[str]) -> None:
                         f"{label} frontmatter description must not contain angle brackets"
                     )
             if skill == ORCHESTRATOR_SKILL:
-                for stage in STAGE_SKILLS:
+                for stage in WORKFLOW_STAGE_SKILLS:
                     if stage not in text:
                         errors.append(f"{label} must mention {stage}")
+            elif skill in SUPPORT_SKILLS:
+                lowered = text.lower()
+                if "read-only" not in lowered or "project state" not in lowered:
+                    errors.append(
+                        f"{label} must define a read-only catalog/reference boundary "
+                        "and must not write project state"
+                    )
             elif "../math-modeling-orchestrator/references/handoff-contract.md" not in text:
                 errors.append(f"{label} must reference shared handoff contract")
         _validate_agent(skill_dir / "agents" / "openai.yaml", skill, errors)
@@ -672,8 +706,8 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
         )
     if missing_workflow:
         errors.append("workflow is missing keys: " + ", ".join(missing_workflow))
-    if workflow.get("schema_version") != "1":
-        errors.append('workflow schema_version must be "1"')
+    if workflow.get("schema_version") != "2":
+        errors.append('workflow schema_version must be "2"')
     if workflow.get("orchestrator") != ORCHESTRATOR_SKILL:
         errors.append(f"workflow orchestrator must be {ORCHESTRATOR_SKILL}")
     stages = workflow.get("stages")
@@ -683,7 +717,7 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
         registered = [stage.get("skill") for stage in stages]
         if not all(isinstance(skill, str) for skill in registered):
             errors.append("workflow stages must contain string skill values")
-        elif registered != list(STAGE_SKILLS):
+        elif registered != list(WORKFLOW_STAGE_SKILLS):
             errors.append("workflow stages must register required skills in order")
         for stage in stages:
             if not isinstance(stage, dict):
@@ -702,12 +736,15 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
             if isinstance(skill, str) and skill not in ALL_SKILLS:
                 errors.append(f"workflow stage references unknown skill: {skill}")
         required_optional = {
+            "math-modeling-preflight": False,
             "math-modeling-problem-analysis": False,
             "math-modeling-data-analysis": True,
             "math-modeling-model-construction": False,
             "math-modeling-model-solving": False,
+            "math-modeling-visualization": True,
             "math-modeling-validation": False,
             "math-modeling-paper-writing": True,
+            "math-modeling-paper-production": True,
         }
         for stage in stages:
             skill = stage.get("skill")
@@ -758,22 +795,9 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
     if not isinstance(guards, dict):
         errors.append("workflow guards must be an object")
     else:
-        if set(guards) != {"data-analysis-skip", "paper-writing"}:
-            errors.append("workflow guards must contain only data-analysis-skip and paper-writing")
-        for guard_name, expected_guard in (
-            (
-                "data-analysis-skip",
-                {"allowed": True, "requires_reason": True},
-            ),
-            (
-                "paper-writing",
-                {
-                    "optional": True,
-                    "requires_validation_pass": True,
-                    "requires_no_invalidated_inputs": True,
-                },
-            ),
-        ):
+        if set(guards) != _WORKFLOW_GUARD_KEYS:
+            errors.append("workflow guards must define the required guard set")
+        for guard_name, expected_guard in _EXPECTED_GUARDS.items():
             guard = guards.get(guard_name)
             if not isinstance(guard, dict):
                 errors.append(f"workflow guard {guard_name} must be an object")
@@ -784,17 +808,8 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
                     f"workflow guard {guard_name} contains unsupported keys: "
                     + ", ".join(unexpected_guard)
                 )
-        if guards.get("data-analysis-skip") != {"allowed": True, "requires_reason": True}:
-            errors.append("workflow data-analysis-skip guard must require allowed and requires_reason")
-        if guards.get("paper-writing") != {
-            "optional": True,
-            "requires_validation_pass": True,
-            "requires_no_invalidated_inputs": True,
-        }:
-            errors.append(
-                "workflow paper-writing guard must require a current validation pass "
-                "and no invalidated inputs"
-            )
+            if guard != expected_guard:
+                errors.append(f"workflow guard {guard_name} must match its required contract")
 
     handoff = workflow.get("handoff")
     if not isinstance(handoff, dict):

@@ -17,6 +17,25 @@ from suite_validation import (  # noqa: E402
 )
 
 
+EXPECTED_WORKFLOW_STAGE_SKILLS = (
+    "math-modeling-preflight",
+    "math-modeling-problem-analysis",
+    "math-modeling-data-analysis",
+    "math-modeling-model-construction",
+    "math-modeling-model-solving",
+    "math-modeling-visualization",
+    "math-modeling-validation",
+    "math-modeling-paper-writing",
+    "math-modeling-paper-production",
+)
+EXPECTED_SUPPORT_SKILLS = ("math-modeling-method-library",)
+EXPECTED_ALL_SKILLS = (
+    "math-modeling-orchestrator",
+    *EXPECTED_WORKFLOW_STAGE_SKILLS,
+    *EXPECTED_SUPPORT_SKILLS,
+)
+
+
 def write_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -43,11 +62,13 @@ def make_valid_suite(root):
     }
     write_json(root / ".codex-plugin" / "plugin.json", manifest)
 
-    for skill in ALL_SKILLS:
+    for skill in EXPECTED_ALL_SKILLS:
         skill_dir = root / "skills" / skill
         skill_dir.mkdir(parents=True, exist_ok=True)
-        body = "\n".join(f"- {stage}" for stage in STAGE_SKILLS)
-        if skill != "math-modeling-orchestrator":
+        body = "\n".join(f"- {stage}" for stage in EXPECTED_WORKFLOW_STAGE_SKILLS)
+        if skill in EXPECTED_SUPPORT_SKILLS:
+            body = "Read-only catalog/reference support. Do not write project state."
+        elif skill != "math-modeling-orchestrator":
             body = "See ../math-modeling-orchestrator/references/handoff-contract.md."
         skill_dir.joinpath("SKILL.md").write_text(
             "---\n"
@@ -95,21 +116,29 @@ def make_valid_suite(root):
     )
 
     workflow = {
-        "schema_version": "1",
+        "schema_version": "2",
         "orchestrator": "math-modeling-orchestrator",
         "stages": [
             {
                 "id": skill.removeprefix("math-modeling-"),
                 "skill": skill,
-                "optional": skill in {"math-modeling-data-analysis", "math-modeling-paper-writing"},
+                "optional": skill
+                in {
+                    "math-modeling-data-analysis",
+                    "math-modeling-visualization",
+                    "math-modeling-paper-writing",
+                    "math-modeling-paper-production",
+                },
             }
-            for skill in STAGE_SKILLS
+            for skill in EXPECTED_WORKFLOW_STAGE_SKILLS
         ],
         "transitions": {
+            "preflight": ["problem-analysis"],
             "problem-analysis": ["data-analysis", "model-construction"],
             "data-analysis": ["model-construction"],
             "model-construction": ["model-solving"],
-            "model-solving": ["validation"],
+            "model-solving": ["visualization", "validation"],
+            "visualization": ["validation"],
             "validation-pass": ["paper-writing", "complete"],
             "validation-fail": [
                 "problem-analysis",
@@ -117,14 +146,26 @@ def make_valid_suite(root):
                 "model-construction",
                 "model-solving",
             ],
-            "paper-writing": ["complete"],
+            "paper-writing": ["paper-production"],
+            "paper-production": ["complete"],
         },
         "guards": {
             "data-analysis-skip": {"allowed": True, "requires_reason": True},
+            "visualization-skip": {
+                "allowed": True,
+                "requires_reason": True,
+                "requires_no_figure_claim": True,
+            },
             "paper-writing": {
                 "optional": True,
                 "requires_validation_pass": True,
+                "requires_gate3": True,
                 "requires_no_invalidated_inputs": True,
+            },
+            "paper-production": {
+                "optional": True,
+                "requires_paper_request": True,
+                "requires_paper_writing": True,
             },
         },
         "handoff": {
@@ -144,6 +185,11 @@ def make_valid_suite(root):
 
 
 class SuiteValidationTests(unittest.TestCase):
+    def test_complete_skill_registry_has_routed_and_support_boundaries(self):
+        self.assertEqual(EXPECTED_WORKFLOW_STAGE_SKILLS, STAGE_SKILLS)
+        self.assertEqual(EXPECTED_ALL_SKILLS, ALL_SKILLS)
+        self.assertNotIn("math-modeling-method-library", STAGE_SKILLS)
+
     def test_rejects_malformed_suite_root(self):
         self.assertIn(
             "suite root must be a valid path",
@@ -224,6 +270,53 @@ class SuiteValidationTests(unittest.TestCase):
             validation_dir.rmdir()
             errors = validate_suite(root)
             self.assertTrue(any("missing required skills" in error for error in errors))
+
+    def test_missing_new_required_skill_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            preflight_dir = root / "skills" / "math-modeling-preflight"
+            for path in sorted(preflight_dir.rglob("*"), reverse=True):
+                if path.is_file():
+                    path.unlink()
+                else:
+                    path.rmdir()
+            preflight_dir.rmdir()
+            self.assertTrue(
+                any(
+                    "math-modeling-preflight" in error
+                    for error in validate_suite(root)
+                )
+            )
+
+    def test_support_skill_uses_read_only_catalog_boundary_not_handoff(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            method_library = (
+                root / "skills" / "math-modeling-method-library" / "SKILL.md"
+            )
+            errors = validate_suite(root)
+            self.assertFalse(
+                any(
+                    "math-modeling-method-library/SKILL.md must reference shared handoff"
+                    in error
+                    for error in errors
+                )
+            )
+            method_library.write_text(
+                method_library.read_text(encoding="utf-8").replace(
+                    "Read-only catalog/reference support. Do not write project state.",
+                    "Reusable modeling methods.",
+                ),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any(
+                    "read-only catalog/reference" in error
+                    for error in validate_suite(root)
+                )
+            )
 
     def test_invalid_validation_fail_route_is_reported_exactly(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -378,6 +471,22 @@ class SuiteValidationTests(unittest.TestCase):
                 "workflow handoff contains unsupported keys: unexpected", errors
             )
 
+    def test_each_guard_rejects_unknown_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            workflow_path = root / "skills" / "math-modeling-orchestrator" / "references" / "workflow.json"
+            workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+            for guard_name in workflow["guards"]:
+                with self.subTest(guard=guard_name):
+                    mutated = json.loads(json.dumps(workflow))
+                    mutated["guards"][guard_name]["unexpected"] = True
+                    write_json(workflow_path, mutated)
+                    self.assertIn(
+                        f"workflow guard {guard_name} contains unsupported keys: unexpected",
+                        validate_suite(root),
+                    )
+
     def test_skill_description_must_be_trigger_oriented(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -487,8 +596,8 @@ class SuiteValidationTests(unittest.TestCase):
             make_valid_suite(root)
             workflow_path = root / "skills" / "math-modeling-orchestrator" / "references" / "workflow.json"
             workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
-            workflow["stages"][0]["optional"] = True
-            workflow["stages"][1]["optional"] = False
+            workflow["stages"][1]["optional"] = True
+            workflow["stages"][2]["optional"] = False
             write_json(workflow_path, workflow)
             errors = validate_suite(root)
             self.assertIn(

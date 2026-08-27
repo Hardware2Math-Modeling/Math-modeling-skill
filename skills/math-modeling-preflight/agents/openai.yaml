@@ -1,0 +1,6 @@
+interface:
+  display_name: "Modeling Preflight"
+  short_description: "Check modeling inputs and tool readiness"
+  default_prompt: "Use $math-modeling-preflight to check this modeling task before analysis."
+policy:
+  allow_implicit_invocation: true

@@ -10,7 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from suite_validation import STAGE_SKILLS, validate_suite  # noqa: E402
+from suite_validation import ALL_SKILLS, STAGE_SKILLS, validate_suite  # noqa: E402
 
 
 WORKFLOW_PATH = (
@@ -40,6 +40,24 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertEqual(list(STAGE_SKILLS), skills)
         self.assertEqual(len(skills), len(set(skills)))
 
+    def test_new_skills_are_discoverable_and_method_library_is_not_a_stage(self) -> None:
+        for skill in (
+            "math-modeling-preflight",
+            "math-modeling-visualization",
+            "math-modeling-paper-production",
+            "math-modeling-method-library",
+        ):
+            with self.subTest(skill=skill):
+                self.assertIn(skill, ALL_SKILLS)
+                self.assertTrue((ROOT / "skills" / skill / "SKILL.md").is_file())
+                self.assertTrue(
+                    (ROOT / "skills" / skill / "agents" / "openai.yaml").is_file()
+                )
+        stage_skills = [item["skill"] for item in self.load_workflow()["stages"]]
+        self.assertNotIn("math-modeling-method-library", stage_skills)
+        self.assertEqual("math-modeling-preflight", stage_skills[0])
+        self.assertEqual("math-modeling-paper-production", stage_skills[-1])
+
     def test_validation_failure_cannot_route_to_paper_writing(self) -> None:
         workflow = self.load_workflow()
         validation_fail_destinations = workflow["transitions"]["validation-fail"]
@@ -60,6 +78,8 @@ class RepositoryContractTests(unittest.TestCase):
             True,
             workflow["guards"]["paper-writing"]["requires_no_invalidated_inputs"],
         )
+        for forbidden in ("paper-writing", "paper-production", "complete"):
+            self.assertNotIn(forbidden, validation_fail_destinations)
 
     def test_handoff_contract_uses_canonical_schema_keys(self) -> None:
         contract = HANDOFF_PATH.read_text(encoding="utf-8")
@@ -90,9 +110,9 @@ class RepositoryContractTests(unittest.TestCase):
                 self.assertNotIn("next.reason", text)
                 self.assertNotIn("next.needs", text)
 
-    def test_orchestrator_starts_every_new_problem_with_problem_analysis(self) -> None:
+    def test_orchestrator_starts_every_new_problem_with_preflight(self) -> None:
         text = ORCHESTRATOR_PATH.read_text(encoding="utf-8").lower()
-        self.assertIn("$math-modeling-problem-analysis", text)
+        self.assertIn("$math-modeling-preflight", text)
         self.assertIn("first for every new problem", text)
         self.assertIn(
             "resume or skip only when an existing handoff records that stage complete",
