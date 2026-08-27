@@ -93,6 +93,92 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "state": {"properties": {"status": {"const": "needs_revision"}}}
+        }
+      },
+      "then": {
+        "properties": {
+          "next": {"properties": {"failed_checks": {"minItems": 1}}}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {"properties": {"status": {"const": "needs_revision"}, "current_stage": {"const": "preflight"}}}
+        }
+      },
+      "then": {"properties": {"next": {"properties": {"recommended_stage": {"enum": [null, "preflight"]}}}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {"properties": {"status": {"const": "needs_revision"}, "current_stage": {"const": "problem-analysis"}}}
+        }
+      },
+      "then": {"properties": {"next": {"properties": {"recommended_stage": {"enum": [null, "preflight", "problem-analysis"]}}}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {"properties": {"status": {"const": "needs_revision"}, "current_stage": {"const": "data-analysis"}}}
+        }
+      },
+      "then": {"properties": {"next": {"properties": {"recommended_stage": {"enum": [null, "preflight", "problem-analysis", "data-analysis"]}}}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {"properties": {"status": {"const": "needs_revision"}, "current_stage": {"const": "model-construction"}}}
+        }
+      },
+      "then": {"properties": {"next": {"properties": {"recommended_stage": {"enum": [null, "preflight", "problem-analysis", "data-analysis", "model-construction"]}}}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {"properties": {"status": {"const": "needs_revision"}, "current_stage": {"const": "model-solving"}}}
+        }
+      },
+      "then": {"properties": {"next": {"properties": {"recommended_stage": {"enum": [null, "preflight", "problem-analysis", "data-analysis", "model-construction", "model-solving"]}}}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {"properties": {"status": {"const": "needs_revision"}, "current_stage": {"const": "visualization"}}}
+        }
+      },
+      "then": {"properties": {"next": {"properties": {"recommended_stage": {"enum": [null, "preflight", "problem-analysis", "data-analysis", "model-construction", "model-solving", "visualization"]}}}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {"properties": {"status": {"const": "needs_revision"}, "current_stage": {"const": "validation"}}}
+        }
+      },
+      "then": {"properties": {"next": {"properties": {"recommended_stage": {"enum": [null, "preflight", "problem-analysis", "data-analysis", "model-construction", "model-solving", "visualization", "validation"]}}}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {"properties": {"status": {"const": "needs_revision"}, "current_stage": {"const": "paper-writing"}}}
+        }
+      },
+      "then": {"properties": {"next": {"properties": {"recommended_stage": {"enum": [null, "preflight", "problem-analysis", "data-analysis", "model-construction", "model-solving", "visualization", "validation", "paper-writing"]}}}}}
+    },
+    {
+      "if": {
+        "properties": {
+          "state": {"properties": {"status": {"const": "needs_revision"}, "current_stage": {"const": "paper-production"}}}
+        }
+      },
+      "then": {"properties": {"next": {"properties": {"recommended_stage": {"enum": [null, "preflight", "problem-analysis", "data-analysis", "model-construction", "model-solving", "visualization", "validation", "paper-writing", "paper-production"]}}}}}
+    }
+  ],
   "$defs": {
     "stage": {
       "enum": ["preflight", "problem-analysis", "data-analysis", "model-construction", "model-solving", "visualization", "validation", "paper-writing", "paper-production"]
@@ -103,7 +189,19 @@
     },
     "evidenceObjects": {
       "type": "array",
-      "items": {"type": "object", "minProperties": 1}
+      "items": {
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": {"$ref": "#/$defs/evidenceValue"}
+      }
+    },
+    "evidenceValue": {
+      "oneOf": [
+        {"type": "string", "minLength": 1, "pattern": "\\S"},
+        {"type": ["number", "boolean", "null"]},
+        {"type": "array", "items": {"$ref": "#/$defs/evidenceValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/evidenceValue"}}
+      ]
     },
     "artifact": {
       "type": "object",
@@ -119,7 +217,7 @@
     "relativePath": {
       "type": "string",
       "minLength": 1,
-      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*//)[^\\\\]+$"
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*\\u0000)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*//)(?!.*\\/$)[^\\\\]+$"
     }
   }
 }

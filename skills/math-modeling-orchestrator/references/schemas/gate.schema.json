@@ -21,5 +21,27 @@
       "type": ["string", "null"],
       "enum": [null, "preflight", "problem-analysis", "data-analysis", "model-construction", "model-solving", "visualization", "validation", "paper-writing", "paper-production"]
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"status": {"const": "confirmed"}}
+      },
+      "then": {
+        "properties": {
+          "confirmed_by": {"type": "string"},
+          "confirmed_at": {"type": "string"},
+          "artifact_hashes": {"minItems": 1}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"status": {"const": "rejected"}}
+      },
+      "then": {
+        "properties": {"rollback_stage": {"type": "string"}}
+      }
+    }
+  ]
 }

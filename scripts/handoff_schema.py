@@ -143,13 +143,14 @@ def _safe_relative_path(value: object, path: str, errors: list[str]) -> None:
     if "\x00" in value or "\\" in value:
         errors.append(f"{path} must use a safe project-relative path")
         return
+    segments = value.split("/")
     posix = PurePosixPath(value)
     windows = PureWindowsPath(value)
     if (
         posix.is_absolute()
         or windows.is_absolute()
         or windows.drive
-        or any(part in ("", ".", "..") for part in posix.parts)
+        or any(segment in ("", ".", "..") for segment in segments)
     ):
         errors.append(f"{path} must use a safe project-relative path")
 
@@ -304,6 +305,11 @@ def _validate_handoff(payload: object, errors: list[str]) -> None:
             errors.append("next.failed_checks must name at least one failed check for needs_revision")
         current = state.get("current_stage")
         recommended = next_value.get("recommended_stage")
+        if _is_string(recommended) and recommended not in STAGES:
+            errors.append(
+                f"next.recommended_stage {recommended!r} must name the same or an "
+                "upstream workflow stage for needs_revision"
+            )
         if current in STAGES and recommended in STAGES:
             if STAGES.index(recommended) > STAGES.index(current):
                 errors.append(
@@ -401,9 +407,14 @@ def _validate_gate(payload: object, errors: list[str]) -> None:
     if type(hashes) is not list:
         errors.append("artifact_hashes must be an array")
     else:
+        seen_hashes: set[str] = set()
         for index, item in enumerate(hashes):
             if not _is_string(item) or _HASH_RE.fullmatch(item) is None:
                 errors.append(f"artifact_hashes[{index}] must be a SHA-256 digest")
+            elif item in seen_hashes:
+                errors.append(f"artifact_hashes[{index}] duplicates {item!r}")
+            else:
+                seen_hashes.add(item)
     if not _is_string(root.get("notes")):
         errors.append("notes must be a string")
     rollback = root.get("rollback_stage")
