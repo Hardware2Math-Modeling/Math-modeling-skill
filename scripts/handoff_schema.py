@@ -622,13 +622,13 @@ def validate_document(
         raise ValueError(f"unsupported document kind: {kind}")
     if mode not in ("runtime", "legacy"):
         raise ValueError(f"unsupported validation mode: {mode}")
+    raw_errors = strict_json_tree_errors(payload)
+    if raw_errors:
+        return raw_errors
     candidate = payload
     if mode == "legacy":
         if kind != "handoff":
             raise ValueError("legacy mode is only supported for handoff documents")
-        raw_errors = strict_json_tree_errors(payload)
-        if raw_errors:
-            return raw_errors
         if type(payload) is dict and payload.get("schema_version") == "1":
             try:
                 candidate = migrate_payload(payload)

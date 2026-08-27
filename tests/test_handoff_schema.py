@@ -19,6 +19,7 @@ SCHEMAS = (
 sys.path.insert(0, str(SCRIPTS))
 
 from handoff_schema import (  # noqa: E402
+    MAX_JSON_DEPTH,
     load_and_validate,
     load_json_strict,
     migrate_payload,
@@ -35,6 +36,13 @@ def valid_handoff_with_computed_value() -> dict[str, object]:
     payload = valid_handoff()
     payload["result"]["computed_values"] = [{"name": "objective", "value": 1.0}]
     return payload
+
+
+def nested_array(depth: int) -> object:
+    value: object = "leaf"
+    for _ in range(depth):
+        value = [value]
+    return value
 
 
 def valid_legacy_handoff() -> dict[str, object]:
@@ -956,6 +964,42 @@ class HandoffSchemaTests(unittest.TestCase):
         deep_text = "[" * 1400 + "0" + "]" * 1400
         with self.assertRaisesRegex(ValueError, "depth"):
             load_json_strict(deep_text)
+
+    def test_runtime_handoff_uses_root_based_json_depth(self) -> None:
+        passing = valid_handoff_with_computed_value()
+        passing["result"]["computed_values"][0]["value"] = nested_array(
+            MAX_JSON_DEPTH - 4
+        )
+        self.assertEqual([], validate_document(passing, kind="handoff"))
+
+        failing = valid_handoff_with_computed_value()
+        failing["result"]["computed_values"][0]["value"] = nested_array(
+            MAX_JSON_DEPTH - 3
+        )
+        errors = validate_document(failing, kind="handoff")
+        self.assertTrue(any("maximum JSON depth" in error for error in errors))
+        with self.assertRaisesRegex(ValueError, "depth"):
+            serialize_payload(failing)
+        with self.assertRaisesRegex(ValueError, "depth"):
+            load_json_strict(json.dumps(failing))
+
+    def test_runtime_manifest_uses_root_based_json_depth(self) -> None:
+        passing = valid_manifest()
+        passing["entries"][0]["metadata"] = nested_array(MAX_JSON_DEPTH - 3)
+        self.assertEqual([], validate_document(passing, kind="manifest"))
+
+        failing = valid_manifest()
+        failing["entries"][0]["metadata"] = nested_array(MAX_JSON_DEPTH - 2)
+        errors = validate_document(failing, kind="manifest")
+        self.assertTrue(any("maximum JSON depth" in error for error in errors))
+
+    def test_runtime_allows_shared_noncyclic_evidence_objects(self) -> None:
+        payload = valid_handoff()
+        shared = {"source": "same object"}
+        payload["context"]["assumptions"] = [
+            {"first": shared, "second": shared}
+        ]
+        self.assertEqual([], validate_document(payload, kind="handoff"))
 
     def test_deep_validation_cli_json_returns_machine_readable_error(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
