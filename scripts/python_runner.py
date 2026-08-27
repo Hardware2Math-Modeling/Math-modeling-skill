@@ -19,7 +19,7 @@ from manifest import (
     sha256_paths,
     utc_now,
 )
-from suite_validation import ensure_no_symlink_components
+from suite_validation import ensure_no_symlink_components, ensure_outside_plugin_root
 
 
 _CLI_MODES = ("json_io", "plain")
@@ -181,7 +181,7 @@ def run_python(
     if not os.access(python, os.X_OK):
         raise ValueError(f"Python executable is not executable: {python}")
     model_script = _regular_file(script, "Python script")
-    project = _directory(cwd, "cwd")
+    project = ensure_outside_plugin_root(_directory(cwd, "cwd"), "cwd")
     output = _prepare_output_directory(output_dir, project)
 
     inputs: list[Path] = []
@@ -264,11 +264,38 @@ def run_python(
     duration_seconds = round(time.monotonic() - started, 6)
 
     _directory(output, "output directory")
-    produced = relative_regular_files(output)
-    collisions = sorted(path.as_posix() for path in produced if path.as_posix() in _RESERVED_OUTPUTS)
-    if collisions:
-        raise ValueError("script wrote reserved runner evidence paths: " + ", ".join(collisions))
-    output_hashes = sha256_paths(output, produced)
+    failure_reason: str | None = None
+    if cli_mode == "json_io" and status == "success":
+        try:
+            _regular_file(json_output, "declared JSON output")
+        except ValueError as error:
+            status = "failed"
+            failure_reason = f"declared JSON output contract failed: {error}"
+    try:
+        produced = relative_regular_files(output)
+        collisions = sorted(
+            path.as_posix()
+            for path in produced
+            if path.as_posix() in _RESERVED_OUTPUTS
+        )
+        if collisions:
+            raise ValueError(
+                "script wrote reserved runner evidence paths: " + ", ".join(collisions)
+            )
+        output_hashes = sha256_paths(output, produced)
+    except ValueError as error:
+        if failure_reason is None:
+            raise
+        output_hashes = {}
+        failure_reason += f"; output inspection failed: {error}"
+    if cli_mode == "json_io" and status == "success":
+        declared_key = safe_relative_path(
+            json_output.relative_to(output).as_posix(),
+            "declared JSON output",
+        ).as_posix()
+        if declared_key not in output_hashes:
+            status = "failed"
+            failure_reason = "declared JSON output is absent from output hashes"
     result: dict[str, object] = {
         "status": status,
         "python_executable": str(python),
@@ -290,6 +317,8 @@ def run_python(
             "stderr": _path_key(output / "stderr.log", project),
         },
     }
+    if failure_reason is not None:
+        result["failure_reason"] = failure_reason
     _persist_run(
         output,
         project,
@@ -302,5 +331,6 @@ def run_python(
     if status == "timeout":
         raise RunFailed(f"Python run timed out after {timeout_seconds} seconds", result)
     if status == "failed":
-        raise RunFailed(f"Python run exited with code {exit_code}", result)
+        message = failure_reason or f"Python run exited with code {exit_code}"
+        raise RunFailed(message, result)
     return result

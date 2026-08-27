@@ -136,6 +136,70 @@ class PreflightTests(unittest.TestCase):
             report["template"]["requested_path"],
         )
 
+    def test_rejects_project_below_plugin_root_before_diagnosis(self) -> None:
+        plugin = self.temp_path / "fixture-plugin"
+        (plugin / ".codex-plugin").mkdir(parents=True)
+        (plugin / ".codex-plugin/plugin.json").write_text("{}\n", encoding="utf-8")
+        runtime = plugin / "runtime"
+        runtime.mkdir()
+
+        with self.assertRaises(ValueError):
+            diagnose_environment(
+                project_root=runtime,
+                python_executable=self.python,
+                required_packages=[],
+                template_path=None,
+            )
+
+    def test_package_probe_failures_are_blocking_without_install_advice(self) -> None:
+        python_probe = subprocess.run(
+            [str(self.python), "-c", "import sys; print(sys.executable); print(sys.version)"],
+            check=False,
+            shell=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+        package_command = [
+            str(self.python),
+            "-c",
+            'import importlib.metadata as m; print(m.version("broken-package"))',
+        ]
+        failures = (
+            subprocess.CompletedProcess(
+                package_command,
+                2,
+                stdout="",
+                stderr="corrupt distribution metadata",
+            ),
+            subprocess.TimeoutExpired(package_command, 15),
+            OSError("interpreter execution failed"),
+        )
+
+        for failure in failures:
+            with self.subTest(failure=type(failure).__name__):
+                with (
+                    patch("preflight.shutil.which", return_value=None),
+                    patch("preflight._run_probe", side_effect=[python_probe, failure]),
+                ):
+                    report = diagnose_environment(
+                        project_root=self.project,
+                        python_executable=self.python,
+                        required_packages=["broken-package"],
+                        template_path=None,
+                    )
+
+                package = report["packages"][0]
+                self.assertEqual("error", package["status"])
+                self.assertIsNone(package["install_command"])
+                self.assertEqual("blocking", report["status"])
+                self.assertTrue(
+                    any("diagnostic failed" in blocker for blocker in report["blockers"]),
+                    report["blockers"],
+                )
+
 
 if __name__ == "__main__":
     unittest.main()

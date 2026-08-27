@@ -134,6 +134,64 @@ class PythonRunnerTests(unittest.TestCase):
         )
         self.assertEqual({"value": 5, "seed": 11}, json.loads(output_path.read_text()))
 
+    def test_json_io_zero_exit_without_declared_output_preserves_failure_evidence(self) -> None:
+        script = self.project / "missing_output.py"
+        script.write_text(
+            "import argparse\n"
+            "parser = argparse.ArgumentParser()\n"
+            "parser.add_argument('--input', required=True)\n"
+            "parser.add_argument('--output', required=True)\n"
+            "parser.add_argument('--seed', required=True)\n"
+            "parser.parse_args()\n",
+            encoding="utf-8",
+        )
+        output_dir = self.project / "missing-output-results"
+        output_path = output_dir / "output.json"
+
+        with self.assertRaises(RunFailed) as raised:
+            run_python(
+                self.python,
+                script,
+                cwd=self.project,
+                output_dir=output_dir,
+                input_paths=[self.input_file],
+                seed=13,
+                timeout_seconds=30,
+                cli_mode="json_io",
+                input_path=self.input_file,
+                output_path=output_path,
+            )
+
+        self.assertEqual(0, raised.exception.result["exit_code"])
+        self.assertEqual("failed", raised.exception.result["status"])
+        self.assertNotIn("output.json", raised.exception.result["output_hashes"])
+        self.assertIn("declared JSON output", raised.exception.result["failure_reason"])
+        manifest = json.loads((output_dir / "run_manifest.json").read_text(encoding="utf-8"))
+        self.assertEqual([raised.exception.result], manifest["entries"])
+
+    def test_rejects_cwd_below_plugin_root_before_creating_output(self) -> None:
+        plugin = self.project / "fixture-plugin"
+        (plugin / ".codex-plugin").mkdir(parents=True)
+        (plugin / ".codex-plugin/plugin.json").write_text("{}\n", encoding="utf-8")
+        runtime = plugin / "runtime"
+        runtime.mkdir()
+        script = runtime / "noop.py"
+        script.write_text("pass\n", encoding="utf-8")
+        output_dir = runtime / "results"
+
+        with self.assertRaises(ValueError):
+            run_python(
+                self.python,
+                script,
+                cwd=runtime,
+                output_dir=output_dir,
+                input_paths=[],
+                seed=0,
+                timeout_seconds=30,
+            )
+
+        self.assertFalse(output_dir.exists())
+
     def test_accepts_an_existing_empty_output_directory(self) -> None:
         output_dir = self.project / "results"
         output_dir.mkdir()

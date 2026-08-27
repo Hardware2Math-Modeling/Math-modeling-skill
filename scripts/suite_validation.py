@@ -312,6 +312,23 @@ def ensure_no_symlink_components(path: Path, label: str) -> Path:
     return absolute
 
 
+def ensure_outside_plugin_root(path: Path, label: str) -> Path:
+    """Reject runtime paths at or below a directory containing a plugin manifest."""
+
+    safe = ensure_no_symlink_components(path, label)
+    for ancestor in (safe, *safe.parents):
+        marker = ancestor / ".codex-plugin" / "plugin.json"
+        try:
+            mode = marker.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise ValueError(f"{label} plugin boundary cannot be inspected: {marker}") from error
+        if stat.S_ISREG(mode) or stat.S_ISLNK(mode):
+            raise ValueError(f"{label} must not be at or below a plugin root: {ancestor}")
+    return safe
+
+
 def is_sensitive_relative_path(path: Path) -> bool:
     """Return whether a relative archive path resembles credential material."""
     for component in path.parts:

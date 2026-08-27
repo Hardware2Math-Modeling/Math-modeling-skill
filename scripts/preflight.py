@@ -14,7 +14,7 @@ import subprocess
 from pathlib import Path
 from typing import Sequence
 
-from suite_validation import ensure_no_symlink_components
+from suite_validation import ensure_no_symlink_components, ensure_outside_plugin_root
 
 
 _PYTHON_PROBE = "import sys; print(sys.executable); print(sys.version)"
@@ -134,7 +134,10 @@ def _package_reports(python: Path, packages: Sequence[str]) -> list[dict[str, ob
                     "error": None,
                 }
             )
-        else:
+        elif (
+            completed is not None
+            and "importlib.metadata.PackageNotFoundError" in completed.stderr
+        ):
             reports.append(
                 {
                     "name": package,
@@ -144,6 +147,16 @@ def _package_reports(python: Path, packages: Sequence[str]) -> list[dict[str, ob
                         [str(python), "-m", "pip", "install", package]
                     ),
                     "error": probe_error or "distribution metadata was not found",
+                }
+            )
+        else:
+            reports.append(
+                {
+                    "name": package,
+                    "status": "error",
+                    "version": None,
+                    "install_command": None,
+                    "error": probe_error or "package metadata probe failed without an error message",
                 }
             )
     return reports
@@ -253,7 +266,10 @@ def diagnose_environment(
 
     if type(paper_production) is not bool:
         raise ValueError("paper_production must be a boolean")
-    project = _directory(project_root, "project root")
+    project = ensure_outside_plugin_root(
+        _directory(project_root, "project root"),
+        "project root",
+    )
     python = _regular_file(python_executable, "Python executable")
     if not os.access(python, os.X_OK):
         raise ValueError(f"Python executable is not executable: {python}")
@@ -272,6 +288,8 @@ def diagnose_environment(
     for package in packages:
         if package["status"] == "missing":
             blockers.append(f"required Python package is missing: {package['name']}")
+        elif package["status"] == "error":
+            blockers.append(f"required Python package diagnostic failed: {package['name']}")
     if latex["status"] == "blocking":
         blockers.append(str(latex["message"]))
     elif latex["status"] == "warning":
