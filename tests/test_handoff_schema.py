@@ -331,6 +331,12 @@ class HandoffSchemaTests(unittest.TestCase):
         errors = validate_document(payload, kind="gate")
         self.assertTrue(any("confirmed_at" in error for error in errors))
 
+    def test_confirmed_gate_rejects_impossible_utc_timestamp(self) -> None:
+        payload = valid_confirmed_gate()
+        payload["confirmed_at"] = "2026-02-31T25:99:99Z"
+        errors = validate_document(payload, kind="gate")
+        self.assertTrue(any("confirmed_at" in error for error in errors))
+
     def test_gate_schema_confirmed_fields_are_nonempty_utc_and_hashed(self) -> None:
         schema = load_schema("gate")
         confirmed = schema["allOf"][0]["then"]["properties"]
@@ -344,9 +350,21 @@ class HandoffSchemaTests(unittest.TestCase):
         errors = validate_document(payload, kind="iteration")
         self.assertTrue(any("updated_at" in error for error in errors))
 
+    def test_iteration_rejects_impossible_utc_timestamp(self) -> None:
+        payload = valid_iteration()
+        payload["updated_at"] = "2026-99-99T99:99:99Z"
+        errors = validate_document(payload, kind="iteration")
+        self.assertTrue(any("updated_at" in error for error in errors))
+
     def test_manifest_rejects_non_utc_created_at(self) -> None:
         payload = valid_manifest()
         payload["created_at"] = "2026-08-27T08:00:00+08:00"
+        errors = validate_document(payload, kind="manifest")
+        self.assertTrue(any("created_at" in error for error in errors))
+
+    def test_manifest_rejects_impossible_utc_timestamp(self) -> None:
+        payload = valid_manifest()
+        payload["created_at"] = "2026-02-31T00:00:00Z"
         errors = validate_document(payload, kind="manifest")
         self.assertTrue(any("created_at" in error for error in errors))
 

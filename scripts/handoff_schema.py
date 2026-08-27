@@ -5,6 +5,7 @@ from __future__ import annotations
 import copy
 import json
 import re
+from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
@@ -46,6 +47,21 @@ _QUESTION_RE = re.compile(r"^Q[1-9][0-9]*$")
 _UTC_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$"
 )
+
+
+def _is_utc_timestamp(value: object) -> bool:
+    """Return whether value is a real UTC-Z timestamp, not just lexical shape."""
+
+    if not _is_string(value) or _UTC_RE.fullmatch(value) is None:
+        return False
+    # Fractional seconds are deliberately accepted at arbitrary precision by the
+    # lexical contract; datetime validates the calendar/date-time portion.
+    base = value[:-1].split(".", 1)[0]
+    try:
+        datetime.strptime(base, "%Y-%m-%dT%H:%M:%S")
+    except ValueError:
+        return False
+    return True
 
 
 def _path(parent: str, field: str) -> str:
@@ -363,7 +379,7 @@ def _validate_iteration(payload: object, errors: list[str]) -> None:
             _enum(gates.get(gate), ("pending", "confirmed", "rejected", "stale"), f"gates.{gate}", errors)
     _enum(root.get("status"), ("pending", "in_progress", "complete", "needs_revision", "stale"), "status", errors)
     updated = root.get("updated_at")
-    if not _is_string(updated) or _UTC_RE.fullmatch(updated) is None:
+    if not _is_utc_timestamp(updated):
         errors.append("updated_at must be a UTC timestamp ending in Z")
 
 
@@ -376,7 +392,7 @@ def _validate_manifest(payload: object, errors: list[str]) -> None:
         errors.append('schema_version must be exactly the string "2"')
     _enum(root.get("manifest_type"), ("input", "environment", "run", "figure", "paper"), "manifest_type", errors)
     created = root.get("created_at")
-    if not _is_string(created) or _UTC_RE.fullmatch(created) is None:
+    if not _is_utc_timestamp(created):
         errors.append("created_at must be a UTC timestamp ending in Z")
     _evidence_array(root.get("entries"), "entries", errors)
 
@@ -403,9 +419,7 @@ def _validate_gate(payload: object, errors: list[str]) -> None:
     confirmed_at = root.get("confirmed_at")
     if confirmer is not None:
         _nonempty_string(confirmer, "confirmed_by", errors)
-    if confirmed_at is not None and (
-        not _is_string(confirmed_at) or _UTC_RE.fullmatch(confirmed_at) is None
-    ):
+    if confirmed_at is not None and not _is_utc_timestamp(confirmed_at):
         errors.append("confirmed_at must be null or a UTC timestamp ending in Z")
     hashes = root.get("artifact_hashes")
     if type(hashes) is not list:
