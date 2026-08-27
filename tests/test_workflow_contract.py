@@ -13,6 +13,7 @@ WORKFLOW_PATH = (
     / "references"
     / "workflow.json"
 )
+PAPER_WRITING_PATH = ROOT / "skills" / "math-modeling-paper-writing" / "SKILL.md"
 
 
 class WorkflowContractTests(unittest.TestCase):
@@ -85,6 +86,16 @@ class WorkflowContractTests(unittest.TestCase):
         failed = self.load_workflow()["transitions"]["validation-fail"]
         for forbidden in ("paper-writing", "paper-production", "complete"):
             self.assertNotIn(forbidden, failed)
+
+    def test_paper_writing_instruction_matches_workflow_successor(self) -> None:
+        workflow = self.load_workflow()
+        successors = workflow["transitions"]["paper-writing"]
+        self.assertEqual(["paper-production"], successors)
+        text = PAPER_WRITING_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            f"set `next.recommended_stage` to `{successors[0]}`",
+            text,
+        )
 
 
 if __name__ == "__main__":

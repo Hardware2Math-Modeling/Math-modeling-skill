@@ -22,6 +22,7 @@ WORKFLOW_PATH = (
 )
 HANDOFF_PATH = WORKFLOW_PATH.parent / "handoff-contract.md"
 ORCHESTRATOR_PATH = WORKFLOW_PATH.parents[1] / "SKILL.md"
+PAPER_WRITING_PATH = ROOT / "skills" / "math-modeling-paper-writing" / "SKILL.md"
 
 
 class RepositoryContractTests(unittest.TestCase):
@@ -80,6 +81,19 @@ class RepositoryContractTests(unittest.TestCase):
         )
         for forbidden in ("paper-writing", "paper-production", "complete"):
             self.assertNotIn(forbidden, validation_fail_destinations)
+
+    def test_paper_writing_recommends_its_only_legal_successor(self) -> None:
+        workflow = self.load_workflow()
+        self.assertEqual(
+            ["paper-production"],
+            workflow["transitions"]["paper-writing"],
+        )
+        text = PAPER_WRITING_PATH.read_text(encoding="utf-8")
+        self.assertIn(
+            "set `next.recommended_stage` to `paper-production`",
+            text,
+        )
+        self.assertNotIn("set `next.recommended_stage` to `complete`", text)
 
     def test_handoff_contract_uses_canonical_schema_keys(self) -> None:
         contract = HANDOFF_PATH.read_text(encoding="utf-8")

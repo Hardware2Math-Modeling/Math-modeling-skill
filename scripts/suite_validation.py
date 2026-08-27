@@ -181,14 +181,13 @@ _EXPECTED_GUARDS = {
     },
 }
 _WORKFLOW_GUARD_KEYS = set(_EXPECTED_GUARDS)
-_SUPPORT_RESOURCE_BOUNDARY = (
-    "## Resource boundary\n\nCatalog/reference resources are read-only."
-)
-_SUPPORT_STATE_BOUNDARY = "## State boundary\n\nMust not write project state."
-_SUPPORT_STATE_PERMISSION_RE = re.compile(
-    r"\b(?:may|can|allowed to)\s+write\s+project\s+state\b",
-    re.IGNORECASE,
-)
+_EXPECTED_SUPPORT_CONTRACT = {
+    "schema_version": "1",
+    "skill": "math-modeling-method-library",
+    "workflow_role": "support",
+    "resource_access": "read_only",
+    "project_state_access": "none",
+}
 _WORKFLOW_HANDOFF_KEYS = {
     "required_fields",
     "statuses",
@@ -705,20 +704,50 @@ def _validate_skills(root: Path, errors: list[str]) -> None:
                     if stage not in text:
                         errors.append(f"{label} must mention {stage}")
             elif skill in SUPPORT_SKILLS:
-                if _SUPPORT_RESOURCE_BOUNDARY not in text:
+                if "references/support-contract.json" not in text:
                     errors.append(
-                        f"{label} must define a read-only catalog/reference resource boundary"
-                    )
-                if (
-                    _SUPPORT_STATE_BOUNDARY not in text
-                    or _SUPPORT_STATE_PERMISSION_RE.search(text)
-                ):
-                    errors.append(
-                        f"{label} must explicitly state it must not write project state"
+                        f"{label} must reference references/support-contract.json"
                     )
             elif "../math-modeling-orchestrator/references/handoff-contract.md" not in text:
                 errors.append(f"{label} must reference shared handoff contract")
         _validate_agent(skill_dir / "agents" / "openai.yaml", skill, errors)
+
+
+def _validate_support_contract(root: Path, errors: list[str]) -> None:
+    label = "skills/math-modeling-method-library/references/support-contract.json"
+    contract_path = root / label
+    contract, _ = _read_json_object(contract_path, errors, label)
+    if contract is None:
+        return
+
+    expected_keys = set(_EXPECTED_SUPPORT_CONTRACT)
+    unexpected = sorted(set(contract) - expected_keys)
+    missing = sorted(expected_keys - set(contract))
+    if unexpected:
+        errors.append(
+            "method-library support contract contains unsupported keys: "
+            + ", ".join(unexpected)
+        )
+    if missing:
+        errors.append(
+            "method-library support contract is missing keys: " + ", ".join(missing)
+        )
+
+    expected_labels = {
+        "schema_version": '"1"',
+        "skill": "math-modeling-method-library",
+        "workflow_role": "support",
+        "resource_access": "read_only",
+        "project_state_access": "none",
+    }
+    for field, expected_value in _EXPECTED_SUPPORT_CONTRACT.items():
+        if field in contract and not _exact_value_equal(
+            contract[field], expected_value
+        ):
+            errors.append(
+                f"method-library support contract {field} must be "
+                f"{expected_labels[field]}"
+            )
 
 
 def _validate_workflow(root: Path, errors: list[str]) -> None:
@@ -900,5 +929,6 @@ def validate_suite(root: Path) -> list[str]:
     errors: list[str] = []
     _validate_manifest(root, errors)
     _validate_skills(root, errors)
+    _validate_support_contract(root, errors)
     _validate_workflow(root, errors)
     return errors

@@ -7,6 +7,8 @@ description: Use when a modeling stage needs a bounded comparison of candidate m
 
 Provide bounded method comparisons to a modeling stage. The calling stage remains responsible for evidence, selection, implementation, and workflow status.
 
+Read the machine-readable [support contract](references/support-contract.json) before using catalog or reference resources. It is the authoritative workflow-role and access boundary.
+
 ## Responsibilities
 
 - Compare only methods relevant to the stated objective, data regime, constraints, assumptions, and evaluation criteria.
@@ -16,8 +18,8 @@ Provide bounded method comparisons to a modeling stage. The calling stage remain
 
 ## Resource boundary
 
-Catalog/reference resources are read-only. This skill may inspect them but must not edit, replace, or extend them during a modeling task.
+Consult catalog and reference resources without modifying their contents during a modeling task.
 
 ## State boundary
 
-Must not write project state. This skill must not mutate a handoff, advance a workflow stage, execute project code, or create competition artifacts. It does not replace problem analysis, model construction, solving, validation, or user judgment.
+Return comparisons to the calling stage without mutating its handoff or advancing workflow state. Do not execute project code or create competition artifacts. This skill does not replace problem analysis, model construction, solving, validation, or user judgment.

@@ -71,7 +71,8 @@ def make_valid_suite(root):
                 "## Resource boundary\n\n"
                 "Catalog/reference resources are read-only.\n\n"
                 "## State boundary\n\n"
-                "Must not write project state."
+                "Must not write project state.\n\n"
+                "See [support contract](references/support-contract.json)."
             )
         elif skill != "math-modeling-orchestrator":
             body = "See ../math-modeling-orchestrator/references/handoff-contract.md."
@@ -187,6 +188,20 @@ def make_valid_suite(root):
         },
     }
     write_json(root / "skills" / "math-modeling-orchestrator" / "references" / "workflow.json", workflow)
+    write_json(
+        root
+        / "skills"
+        / "math-modeling-method-library"
+        / "references"
+        / "support-contract.json",
+        {
+            "schema_version": "1",
+            "skill": "math-modeling-method-library",
+            "workflow_role": "support",
+            "resource_access": "read_only",
+            "project_state_access": "none",
+        },
+    )
 
 
 class SuiteValidationTests(unittest.TestCase):
@@ -294,52 +309,115 @@ class SuiteValidationTests(unittest.TestCase):
                 )
             )
 
-    def test_support_skill_uses_read_only_catalog_boundary_not_handoff(self):
+    def test_support_skill_boundary_prose_does_not_define_machine_contract(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             make_valid_suite(root)
             method_library = (
                 root / "skills" / "math-modeling-method-library" / "SKILL.md"
             )
-            errors = validate_suite(root)
-            self.assertFalse(
-                any(
-                    "math-modeling-method-library/SKILL.md must reference shared handoff"
-                    in error
-                    for error in errors
-                )
-            )
             method_library.write_text(
-                method_library.read_text(encoding="utf-8").replace(
-                    "Catalog/reference resources are read-only.",
-                    "Reusable modeling methods.",
-                ),
+                "---\n"
+                "name: math-modeling-method-library\n"
+                "description: Use when a stage needs reusable modeling references.\n"
+                "---\n\n"
+                "Use the linked [support contract](references/support-contract.json). "
+                "Consult reference material without altering runtime state.\n",
                 encoding="utf-8",
             )
-            self.assertTrue(
-                any(
-                    "read-only catalog/reference" in error
-                    for error in validate_suite(root)
-                )
-            )
+            self.assertEqual([], validate_suite(root))
 
-    def test_support_skill_rejects_contradictory_project_state_permission(self):
+    def test_support_contract_rejects_invalid_access_values(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             make_valid_suite(root)
-            method_library = (
-                root / "skills" / "math-modeling-method-library" / "SKILL.md"
+            contract_path = (
+                root
+                / "skills"
+                / "math-modeling-method-library"
+                / "references"
+                / "support-contract.json"
             )
-            method_library.write_text(
-                method_library.read_text(encoding="utf-8")
-                + "\nThis skill may write project state.\n",
-                encoding="utf-8",
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            for field, invalid_value in (
+                ("resource_access", "read_write"),
+                ("project_state_access", "write"),
+            ):
+                with self.subTest(field=field):
+                    mutated = dict(contract)
+                    mutated[field] = invalid_value
+                    write_json(contract_path, mutated)
+                    self.assertIn(
+                        f"method-library support contract {field} must be "
+                        + ("read_only" if field == "resource_access" else "none"),
+                        validate_suite(root),
+                    )
+
+    def test_support_contract_rejects_missing_extra_and_wrong_type_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            contract_path = (
+                root
+                / "skills"
+                / "math-modeling-method-library"
+                / "references"
+                / "support-contract.json"
             )
-            self.assertTrue(
-                any(
-                    "must not write project state" in error
-                    for error in validate_suite(root)
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            variants = []
+            missing = dict(contract)
+            missing.pop("workflow_role")
+            variants.append(
+                (
+                    missing,
+                    "method-library support contract is missing keys: workflow_role",
                 )
+            )
+            extra = {**contract, "unexpected": True}
+            variants.append(
+                (
+                    extra,
+                    "method-library support contract contains unsupported keys: unexpected",
+                )
+            )
+            wrong_type = {**contract, "schema_version": 1}
+            variants.append(
+                (
+                    wrong_type,
+                    'method-library support contract schema_version must be "1"',
+                )
+            )
+            for payload, expected_error in variants:
+                with self.subTest(expected=expected_error):
+                    write_json(contract_path, payload)
+                    self.assertIn(expected_error, validate_suite(root))
+
+    def test_support_contract_rejects_invalid_json_and_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "suite"
+            make_valid_suite(root)
+            contract_path = (
+                root
+                / "skills"
+                / "math-modeling-method-library"
+                / "references"
+                / "support-contract.json"
+            )
+            contract_path.write_text("{", encoding="utf-8")
+            label = "skills/math-modeling-method-library/references/support-contract.json"
+            self.assertIn(f"invalid JSON in {label}", validate_suite(root))
+
+            external = base / "external-support-contract.json"
+            contract_path.replace(external)
+            try:
+                contract_path.symlink_to(external)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+            self.assertIn(
+                f"{label} must not use symbolic links",
+                validate_suite(root),
             )
 
     def test_invalid_validation_fail_route_is_reported_exactly(self):
