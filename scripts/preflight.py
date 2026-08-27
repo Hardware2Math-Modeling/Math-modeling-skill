@@ -20,6 +20,8 @@ from suite_validation import ensure_no_symlink_components, ensure_outside_plugin
 _PYTHON_PROBE = "import sys; print(sys.executable); print(sys.version)"
 _LATEX_TOOLS = ("tectonic", "latexmk", "xelatex", "pdflatex")
 _PACKAGE_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
+_PACKAGE_NOT_FOUND_EXIT_CODE = 44
+_PACKAGE_NOT_FOUND_SENTINEL = "__MATH_MODELING_PACKAGE_NOT_FOUND__"
 _PROBE_TIMEOUT_SECONDS = 15
 
 
@@ -116,7 +118,15 @@ def _package_reports(python: Path, packages: Sequence[str]) -> list[dict[str, ob
         if normalized in seen:
             raise ValueError(f"duplicate required package: {package}")
         seen.add(normalized)
-        code = f"import importlib.metadata as m; print(m.version({json.dumps(package)}))"
+        code = (
+            "import importlib.metadata as m\n"
+            "import sys\n"
+            "try:\n"
+            f"    print(m.version({json.dumps(package)}))\n"
+            "except m.PackageNotFoundError:\n"
+            f"    print({_PACKAGE_NOT_FOUND_SENTINEL!r}, file=sys.stderr)\n"
+            f"    raise SystemExit({_PACKAGE_NOT_FOUND_EXIT_CODE})\n"
+        )
         try:
             completed = _run_probe([str(python), "-c", code])
         except (OSError, subprocess.TimeoutExpired) as error:
@@ -136,7 +146,9 @@ def _package_reports(python: Path, packages: Sequence[str]) -> list[dict[str, ob
             )
         elif (
             completed is not None
-            and "importlib.metadata.PackageNotFoundError" in completed.stderr
+            and completed.returncode == _PACKAGE_NOT_FOUND_EXIT_CODE
+            and not completed.stdout
+            and completed.stderr.strip() == _PACKAGE_NOT_FOUND_SENTINEL
         ):
             reports.append(
                 {
@@ -146,7 +158,7 @@ def _package_reports(python: Path, packages: Sequence[str]) -> list[dict[str, ob
                     "install_command": shlex.join(
                         [str(python), "-m", "pip", "install", package]
                     ),
-                    "error": probe_error or "distribution metadata was not found",
+                    "error": "distribution metadata was not found",
                 }
             )
         else:

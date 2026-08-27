@@ -200,6 +200,46 @@ class PreflightTests(unittest.TestCase):
                     report["blockers"],
                 )
 
+    def test_package_probe_terminal_error_cannot_masquerade_as_not_found(self) -> None:
+        python_probe = subprocess.run(
+            [str(self.python), "-c", "import sys; print(sys.executable); print(sys.version)"],
+            check=False,
+            shell=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=15,
+        )
+        ambiguous_failure = subprocess.CompletedProcess(
+            [str(self.python), "-c", "package probe"],
+            2,
+            stdout="",
+            stderr=(
+                "importlib.metadata.PackageNotFoundError: earlier lookup failed\n"
+                "RuntimeError: terminal metadata failure\n"
+            ),
+        )
+
+        with (
+            patch("preflight.shutil.which", return_value=None),
+            patch(
+                "preflight._run_probe",
+                side_effect=[python_probe, ambiguous_failure],
+            ),
+        ):
+            report = diagnose_environment(
+                project_root=self.project,
+                python_executable=self.python,
+                required_packages=["ambiguous-package"],
+                template_path=None,
+            )
+
+        package = report["packages"][0]
+        self.assertEqual("error", package["status"])
+        self.assertIsNone(package["install_command"])
+        self.assertEqual("blocking", report["status"])
+
 
 if __name__ == "__main__":
     unittest.main()
