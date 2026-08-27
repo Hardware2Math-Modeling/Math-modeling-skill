@@ -236,6 +236,12 @@ class HandoffSchemaTests(unittest.TestCase):
         errors = validate_document(payload, kind="handoff", mode="runtime")
         self.assertTrue(any("paper-writing" in error for error in errors))
 
+    def test_needs_revision_rejects_complete_authorization(self) -> None:
+        payload = valid_needs_revision()
+        payload["next"]["recommended_stage"] = "complete"
+        errors = validate_document(payload, kind="handoff", mode="runtime")
+        self.assertTrue(any("complete" in error for error in errors))
+
     def test_needs_revision_rejects_unknown_recommended_stage(self) -> None:
         payload = valid_needs_revision()
         payload["next"]["recommended_stage"] = "manual-review"

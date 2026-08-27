@@ -309,6 +309,11 @@ def _validate_handoff(payload: object, errors: list[str]) -> None:
             errors.append("next.failed_checks must name at least one failed check for needs_revision")
         current = state.get("current_stage")
         recommended = next_value.get("recommended_stage")
+        if recommended == "complete":
+            errors.append(
+                "next.recommended_stage 'complete' cannot authorize a forward "
+                "transition for needs_revision"
+            )
         if current in STAGES and recommended in STAGES:
             if STAGES.index(recommended) > STAGES.index(current):
                 errors.append(
