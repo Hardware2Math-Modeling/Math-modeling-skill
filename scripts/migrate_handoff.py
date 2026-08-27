@@ -29,7 +29,21 @@ def serialize_payload(payload: object, *, pretty: bool = False) -> str:
         raise ValueError(f"payload cannot be serialized as strict JSON: {error}") from error
 
 
+def _canonical_output_path(raw_path: str) -> Path:
+    """Reject non-canonical lexical output paths before filesystem checks."""
+
+    if not raw_path or "\x00" in raw_path:
+        raise ValueError("output must be a non-empty canonical path")
+    components = raw_path.split("/")
+    if raw_path.startswith("/"):
+        components = components[1:]
+    if any(component in {"", ".", ".."} for component in components):
+        raise ValueError("output path must not contain empty, '.' or '..' components")
+    return Path(raw_path)
+
+
 def _write_new_atomically(path: Path, content: str) -> None:
+    path = _canonical_output_path(os.fspath(path))
     try:
         path = ensure_no_symlink_components(path, "output")
     except ValueError as error:
@@ -66,19 +80,20 @@ def _write_new_atomically(path: Path, content: str) -> None:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Migrate a modeling handoff to schema v2.")
     parser.add_argument("--input", required=True, type=Path, help="Legacy handoff JSON path.")
-    parser.add_argument("--output", required=True, type=Path, help="New v2 handoff path.")
+    parser.add_argument("--output", required=True, help="New v2 handoff path.")
     parser.add_argument("--pretty", action="store_true", help="Indent the output JSON.")
     args = parser.parse_args()
     try:
-        if args.output.exists() or args.output.is_symlink():
-            raise FileExistsError(f"output already exists: {args.output}")
+        output_path = _canonical_output_path(args.output)
+        if output_path.exists() or output_path.is_symlink():
+            raise FileExistsError(f"output already exists: {output_path}")
         migrated = load_and_validate(args.input, kind="handoff", mode="legacy")
         content = serialize_payload(migrated, pretty=args.pretty)
-        _write_new_atomically(args.output, content)
+        _write_new_atomically(output_path, content)
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as error:
         print(f"handoff migration failed: {error}", file=sys.stderr)
         return 1
-    print(f"handoff migrated: {args.input} -> {args.output}")
+    print(f"handoff migrated: {args.input} -> {output_path}")
     return 0
 
 

@@ -163,9 +163,16 @@ def _evidence_array(value: object, path: str, errors: list[str]) -> None:
         _evidence_value(item, item_path, errors)
 
 
-def _evidence_value(value: object, path: str, errors: list[str]) -> None:
+def _evidence_value(
+    value: object,
+    path: str,
+    errors: list[str],
+    active_containers: set[int] | None = None,
+) -> None:
     """Validate one recursive evidence value against strict JSON types."""
 
+    if active_containers is None:
+        active_containers = set()
     if _is_string(value):
         if not value.strip():
             errors.append(f"{path} must not be an empty string")
@@ -177,21 +184,39 @@ def _evidence_value(value: object, path: str, errors: list[str]) -> None:
             errors.append(f"{path} must be a finite JSON number")
         return
     if type(value) is list:
-        for index, item in enumerate(value):
-            _evidence_value(item, f"{path}[{index}]", errors)
+        identity = id(value)
+        if identity in active_containers:
+            errors.append(f"{path} must not contain a reference cycle")
+            return
+        active_containers.add(identity)
+        try:
+            for index, item in enumerate(value):
+                _evidence_value(
+                    item, f"{path}[{index}]", errors, active_containers
+                )
+        finally:
+            active_containers.remove(identity)
         return
     if type(value) is dict:
-        # Validate keys before traversing values.  Never sort a mixed-key dict;
-        # sorting only the string keys keeps errors deterministic and avoids
-        # TypeError from comparing unlike key types.
-        string_keys: list[str] = []
-        for key in value:
-            if type(key) is not str:
-                errors.append(f"{path} must use a string key (found {type(key).__name__})")
-            else:
-                string_keys.append(key)
-        for key in sorted(string_keys):
-            _evidence_value(value[key], _path(path, key), errors)
+        identity = id(value)
+        if identity in active_containers:
+            errors.append(f"{path} must not contain a reference cycle")
+            return
+        active_containers.add(identity)
+        try:
+            invalid_types = sorted(
+                {type(key).__name__ for key in value if type(key) is not str}
+            )
+            for type_name in invalid_types:
+                errors.append(
+                    f"{path} must use a string key (found {type_name})"
+                )
+            for key in sorted(key for key in value if type(key) is str):
+                _evidence_value(
+                    value[key], _path(path, key), errors, active_containers
+                )
+        finally:
+            active_containers.remove(identity)
         return
     errors.append(f"{path} must contain only strict JSON values")
 

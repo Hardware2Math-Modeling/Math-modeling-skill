@@ -188,6 +188,36 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertTrue(any("result.computed_values[0].value" in error for error in first))
         self.assertTrue(any("string key" in error for error in first))
 
+    def test_evidence_invalid_key_errors_ignore_insertion_order(self) -> None:
+        first_payload = valid_handoff_with_computed_value()
+        first_payload["result"]["computed_values"][0]["value"] = {
+            1: "integer",
+            (2,): "tuple",
+        }
+        second_payload = valid_handoff_with_computed_value()
+        second_payload["result"]["computed_values"][0]["value"] = {
+            (2,): "tuple",
+            1: "integer",
+        }
+        self.assertEqual(
+            validate_document(first_payload, kind="handoff"),
+            validate_document(second_payload, kind="handoff"),
+        )
+
+    def test_direct_evidence_rejects_cyclic_container(self) -> None:
+        payload = valid_handoff_with_computed_value()
+        cyclic: dict[str, object] = {}
+        cyclic["self"] = cyclic
+        payload["result"]["computed_values"][0]["value"] = cyclic
+        errors = validate_document(payload, kind="handoff")
+        self.assertTrue(
+            any(
+                "result.computed_values[0].value.self" in error
+                and "reference cycle" in error
+                for error in errors
+            )
+        )
+
     def test_schema_recursively_rejects_empty_evidence_strings(self) -> None:
         schema = load_schema("handoff")
         evidence_objects = schema["$defs"]["evidenceObjects"]
@@ -641,6 +671,50 @@ class HandoffSchemaTests(unittest.TestCase):
             )
             self.assertEqual(1, result.returncode, result.stdout + result.stderr)
             self.assertIn("symlink", result.stderr)
+            self.assertFalse(outside.joinpath("v2.json").exists())
+
+    def test_migration_cli_rejects_normalized_symlinked_output_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            project = base / "project"
+            outside = base / "outside"
+            project.mkdir()
+            outside.mkdir()
+            try:
+                project.joinpath("linked-output").symlink_to(
+                    outside, target_is_directory=True
+                )
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+            legacy_path = project / "legacy.json"
+            legacy_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1",
+                        "task": {"statement": "legacy task"},
+                        "state": {"current_stage": "model-solving"},
+                        "result": {},
+                        "next": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output_path = project / "missing" / ".." / "linked-output" / "v2.json"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "migrate_handoff.py"),
+                    "--input",
+                    str(legacy_path),
+                    "--output",
+                    str(output_path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+            self.assertIn("must not contain", result.stderr)
             self.assertFalse(outside.joinpath("v2.json").exists())
 
     def test_migration_serialization_disallows_nonstandard_constants(self) -> None:
