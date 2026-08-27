@@ -49,6 +49,28 @@ _UTC_RE = re.compile(
 )
 
 
+def _reject_json_constant(constant: str) -> object:
+    raise ValueError(f"non-standard JSON constant {constant!r} is not allowed")
+
+
+def load_json_strict(source: str | Path) -> object:
+    """Load RFC-compliant JSON text or a UTF-8 JSON file."""
+
+    if isinstance(source, Path):
+        label = str(source)
+        try:
+            text = source.read_text(encoding="utf-8")
+        except (OSError, UnicodeError) as error:
+            raise ValueError(f"unable to read valid JSON from {label}: {error}") from error
+    else:
+        label = "input text"
+        text = source
+    try:
+        return json.loads(text, parse_constant=_reject_json_constant)
+    except (json.JSONDecodeError, ValueError) as error:
+        raise ValueError(f"unable to read valid JSON from {label}: {error}") from error
+
+
 def _is_utc_timestamp(value: object) -> bool:
     """Return whether value is a real UTC-Z timestamp, not just lexical shape."""
 
@@ -658,10 +680,7 @@ def load_and_validate(
 ) -> dict[str, object]:
     """Load JSON, validate it, and raise ValueError on an invalid document."""
 
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, json.JSONDecodeError) as error:
-        raise ValueError(f"unable to read valid JSON from {path}: {error}") from error
+    payload = load_json_strict(path)
     errors = validate_document(payload, kind=kind, mode=mode)
     if errors:
         raise ValueError(f"invalid {kind} document:\n- " + "\n- ".join(errors))

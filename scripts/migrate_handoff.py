@@ -10,7 +10,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-from handoff_schema import migrate_payload, validate_document
+from handoff_schema import load_json_strict, migrate_payload, validate_document
 
 
 def _write_new_atomically(path: Path, content: str) -> None:
@@ -52,7 +52,7 @@ def main() -> int:
     try:
         if args.output.exists() or args.output.is_symlink():
             raise FileExistsError(f"output already exists: {args.output}")
-        payload = json.loads(args.input.read_text(encoding="utf-8"))
+        payload = load_json_strict(args.input)
         migrated = migrate_payload(payload)
         errors = validate_document(migrated, kind="handoff", mode="runtime")
         if errors:
@@ -62,6 +62,7 @@ def main() -> int:
             ensure_ascii=False,
             indent=2 if args.pretty else None,
             sort_keys=True,
+            allow_nan=False,
         ) + "\n"
         _write_new_atomically(args.output, content)
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as error:

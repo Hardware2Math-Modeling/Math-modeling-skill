@@ -29,6 +29,12 @@ def valid_handoff() -> dict[str, object]:
     return copy.deepcopy(json.loads(FIXTURE.read_text(encoding="utf-8")))
 
 
+def valid_handoff_with_computed_value() -> dict[str, object]:
+    payload = valid_handoff()
+    payload["result"]["computed_values"] = [{"name": "objective", "value": 1.0}]
+    return payload
+
+
 def valid_needs_revision() -> dict[str, object]:
     payload = valid_handoff()
     payload["state"]["status"] = "needs_revision"
@@ -451,6 +457,73 @@ class HandoffSchemaTests(unittest.TestCase):
             invalid_path.write_text(json.dumps(invalid_payload), encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "state.current_stage"):
                 load_and_validate(invalid_path, kind="handoff")
+
+    def test_load_and_validate_rejects_nonstandard_json_constants(self) -> None:
+        for constant in (float("nan"), float("inf"), float("-inf")):
+            with self.subTest(constant=constant), tempfile.TemporaryDirectory() as directory:
+                payload = valid_handoff_with_computed_value()
+                payload["result"]["computed_values"][0]["value"] = constant
+                path = Path(directory) / "handoff.json"
+                path.write_text(json.dumps(payload), encoding="utf-8")
+
+                with self.assertRaisesRegex(ValueError, "non-standard JSON constant"):
+                    load_and_validate(path, kind="handoff")
+
+    def test_validation_cli_json_rejects_nonstandard_constant(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            payload = valid_handoff_with_computed_value()
+            payload["result"]["computed_values"][0]["value"] = float("nan")
+            path = Path(directory) / "handoff.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "validate_handoff.py"),
+                    "--input",
+                    str(path),
+                    "--json",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+            report = json.loads(result.stdout)
+            self.assertFalse(report["valid"])
+            self.assertTrue(any("non-standard JSON constant" in error for error in report["errors"]))
+
+    def test_migration_cli_rejects_nonstandard_constant(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            legacy = {
+                "schema_version": "1",
+                "task": {"statement": "legacy task"},
+                "state": {"current_stage": "model-solving"},
+                "result": {"computed_values": [{"name": "objective", "value": float("inf")}]},
+                "next": {},
+            }
+            input_path = Path(directory) / "legacy.json"
+            output_path = Path(directory) / "v2.json"
+            input_path.write_text(json.dumps(legacy), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "migrate_handoff.py"),
+                    "--input",
+                    str(input_path),
+                    "--output",
+                    str(output_path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+            self.assertIn("non-standard JSON constant", result.stderr)
+            self.assertFalse(output_path.exists())
+
+    def test_migration_serialization_disallows_nonstandard_constants(self) -> None:
+        source = SCRIPTS.joinpath("migrate_handoff.py").read_text(encoding="utf-8")
+        self.assertIn("allow_nan=False", source)
 
     def test_load_and_validate_rejects_artifact_symlink_escape(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
