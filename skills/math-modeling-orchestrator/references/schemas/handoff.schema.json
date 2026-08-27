@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "handoff.schema.json",
+  "title": "Math modeling handoff v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "task",
+    "state",
+    "context",
+    "artifacts",
+    "quality",
+    "result",
+    "next"
+  ],
+  "properties": {
+    "schema_version": {"const": "2"},
+    "task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["statement", "objectives", "constraints"],
+      "properties": {
+        "statement": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "objectives": {"$ref": "#/$defs/nonEmptyStrings"},
+        "constraints": {"$ref": "#/$defs/nonEmptyStrings"}
+      }
+    },
+    "state": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["current_stage", "status", "validation_status", "completed_stages", "invalidated_stages"],
+      "properties": {
+        "current_stage": {"$ref": "#/$defs/stage"},
+        "status": {"enum": ["pending", "in_progress", "complete", "needs_revision", "skipped"]},
+        "validation_status": {"enum": ["pending", "pass", "needs_revision", "stale"]},
+        "completed_stages": {"type": "array", "items": {"$ref": "#/$defs/stage"}, "uniqueItems": true},
+        "invalidated_stages": {"type": "array", "items": {"$ref": "#/$defs/stage"}, "uniqueItems": true}
+      }
+    },
+    "context": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["assumptions", "variables", "data", "methods", "decisions", "equations", "parameters"],
+      "properties": {
+        "assumptions": {"$ref": "#/$defs/evidenceObjects"},
+        "variables": {"$ref": "#/$defs/evidenceObjects"},
+        "data": {"$ref": "#/$defs/evidenceObjects"},
+        "methods": {"$ref": "#/$defs/evidenceObjects"},
+        "decisions": {"$ref": "#/$defs/evidenceObjects"},
+        "equations": {"$ref": "#/$defs/evidenceObjects"},
+        "parameters": {"$ref": "#/$defs/evidenceObjects"}
+      }
+    },
+    "artifacts": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/artifact"}
+    },
+    "quality": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["checks", "warnings", "confidence", "limitations"],
+      "properties": {
+        "checks": {"$ref": "#/$defs/evidenceObjects"},
+        "warnings": {"$ref": "#/$defs/nonEmptyStrings"},
+        "confidence": {"enum": ["high", "medium", "low"]},
+        "limitations": {"$ref": "#/$defs/nonEmptyStrings"}
+      }
+    },
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["summary", "details", "accepted_model", "rejected_alternatives", "evidence", "computed_values", "citations"],
+      "properties": {
+        "summary": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "details": {"$ref": "#/$defs/nonEmptyStrings"},
+        "accepted_model": {"type": ["string", "null"], "minLength": 1, "pattern": "\\S"},
+        "rejected_alternatives": {"$ref": "#/$defs/evidenceObjects"},
+        "evidence": {"$ref": "#/$defs/nonEmptyStrings"},
+        "computed_values": {"$ref": "#/$defs/evidenceObjects"},
+        "citations": {"$ref": "#/$defs/evidenceObjects"}
+      }
+    },
+    "next": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["recommended_stage", "rationale", "alternatives", "failed_checks"],
+      "properties": {
+        "recommended_stage": {"type": ["string", "null"], "minLength": 1, "pattern": "\\S"},
+        "rationale": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "alternatives": {"$ref": "#/$defs/nonEmptyStrings"},
+        "failed_checks": {"$ref": "#/$defs/nonEmptyStrings"}
+      }
+    }
+  },
+  "$defs": {
+    "stage": {
+      "enum": ["preflight", "problem-analysis", "data-analysis", "model-construction", "model-solving", "visualization", "validation", "paper-writing", "paper-production"]
+    },
+    "nonEmptyStrings": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "pattern": "\\S"}
+    },
+    "evidenceObjects": {
+      "type": "array",
+      "items": {"type": "object", "minProperties": 1}
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "kind", "description"],
+      "properties": {
+        "path": {"$ref": "#/$defs/relativePath"},
+        "kind": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "description": {"type": "string", "minLength": 1, "pattern": "\\S"},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?![A-Za-z]:)(?!.*(?:^|/)(?:\\.|\\.\\.)(?:/|$))(?!.*//)[^\\\\]+$"
+    }
+  }
+}

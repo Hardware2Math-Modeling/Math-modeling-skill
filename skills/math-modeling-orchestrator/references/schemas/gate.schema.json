@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gate.schema.json",
+  "title": "Math modeling confirmation gate v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "gate_id", "status", "confirmed_by", "confirmed_at", "artifact_hashes", "notes", "rollback_stage"],
+  "properties": {
+    "schema_version": {"const": "2"},
+    "gate_id": {"enum": ["gate1", "gate2", "gate3"]},
+    "status": {"enum": ["pending", "confirmed", "rejected"]},
+    "confirmed_by": {"type": ["string", "null"], "minLength": 1, "pattern": "\\S"},
+    "confirmed_at": {"type": ["string", "null"], "format": "date-time"},
+    "artifact_hashes": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+      "uniqueItems": true
+    },
+    "notes": {"type": "string"},
+    "rollback_stage": {
+      "type": ["string", "null"],
+      "enum": [null, "preflight", "problem-analysis", "data-analysis", "model-construction", "model-solving", "visualization", "validation", "paper-writing", "paper-production"]
+    }
+  }
+}

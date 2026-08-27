@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "iteration.schema.json",
+  "title": "Math modeling iteration pointer v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "project_id", "active_iteration", "question_sources", "gates", "status", "updated_at"],
+  "properties": {
+    "schema_version": {"const": "2"},
+    "project_id": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "active_iteration": {"type": "string", "pattern": "^v[0-9]{3,}$"},
+    "question_sources": {
+      "type": "object",
+      "propertyNames": {"pattern": "^Q[1-9][0-9]*$"},
+      "additionalProperties": {"type": "string", "pattern": "^v[0-9]{3,}$"}
+    },
+    "gates": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["gate1", "gate2", "gate3"],
+      "properties": {
+        "gate1": {"$ref": "#/$defs/gateStatus"},
+        "gate2": {"$ref": "#/$defs/gateStatus"},
+        "gate3": {"$ref": "#/$defs/gateStatus"}
+      }
+    },
+    "status": {"enum": ["pending", "in_progress", "complete", "needs_revision", "stale"]},
+    "updated_at": {"type": "string", "format": "date-time"}
+  },
+  "$defs": {
+    "gateStatus": {"enum": ["pending", "confirmed", "rejected", "stale"]}
+  }
+}

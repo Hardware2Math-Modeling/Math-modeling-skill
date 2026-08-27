@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "manifest.schema.json",
+  "title": "Math modeling evidence manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "manifest_type", "created_at", "entries"],
+  "properties": {
+    "schema_version": {"const": "2"},
+    "manifest_type": {"enum": ["input", "environment", "run", "figure", "paper"]},
+    "created_at": {"type": "string", "format": "date-time"},
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "minProperties": 1
+      }
+    }
+  }
+}

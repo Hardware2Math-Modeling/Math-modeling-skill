@@ -1,0 +1,60 @@
+{
+  "schema_version": "2",
+  "task": {
+    "statement": "Allocate capacity while satisfying the stated demand.",
+    "objectives": [
+      "Minimize total cost."
+    ],
+    "constraints": [
+      "Meet demand in every period."
+    ]
+  },
+  "state": {
+    "current_stage": "model-solving",
+    "status": "complete",
+    "validation_status": "pending",
+    "completed_stages": [
+      "problem-analysis",
+      "model-construction",
+      "model-solving"
+    ],
+    "invalidated_stages": []
+  },
+  "context": {
+    "assumptions": [],
+    "variables": [],
+    "data": [],
+    "methods": [],
+    "decisions": [],
+    "equations": [],
+    "parameters": []
+  },
+  "artifacts": [
+    {
+      "path": "artifacts/model-solution.json",
+      "kind": "result",
+      "description": "Structured solver output."
+    }
+  ],
+  "quality": {
+    "checks": [],
+    "warnings": [],
+    "confidence": "medium",
+    "limitations": []
+  },
+  "result": {
+    "summary": "The candidate solution satisfies the encoded constraints.",
+    "details": [],
+    "accepted_model": "Linear allocation model",
+    "rejected_alternatives": [],
+    "evidence": [],
+    "computed_values": [],
+    "citations": []
+  },
+  "next": {
+    "recommended_stage": "validation",
+    "rationale": "The solver output is ready for independent validation.",
+    "alternatives": [],
+    "failed_checks": []
+  }
+}
