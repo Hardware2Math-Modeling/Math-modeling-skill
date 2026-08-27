@@ -295,6 +295,10 @@ def _validate_handoff(payload: object, errors: list[str]) -> None:
         recommended = next_value.get("recommended_stage")
         if recommended is not None:
             _nonempty_string(recommended, "next.recommended_stage", errors)
+            if _is_string(recommended) and recommended not in (*STAGES, "complete"):
+                errors.append(
+                    f"next.recommended_stage {recommended!r} must be a workflow stage or complete"
+                )
         _nonempty_string(next_value.get("rationale"), "next.rationale", errors)
         _string_array(next_value.get("alternatives"), "next.alternatives", errors)
         _string_array(next_value.get("failed_checks"), "next.failed_checks", errors)
@@ -305,11 +309,6 @@ def _validate_handoff(payload: object, errors: list[str]) -> None:
             errors.append("next.failed_checks must name at least one failed check for needs_revision")
         current = state.get("current_stage")
         recommended = next_value.get("recommended_stage")
-        if _is_string(recommended) and recommended not in STAGES:
-            errors.append(
-                f"next.recommended_stage {recommended!r} must name the same or an "
-                "upstream workflow stage for needs_revision"
-            )
         if current in STAGES and recommended in STAGES:
             if STAGES.index(recommended) > STAGES.index(current):
                 errors.append(

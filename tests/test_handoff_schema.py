@@ -50,6 +50,40 @@ def valid_pending_gate() -> dict[str, object]:
     }
 
 
+def valid_confirmed_gate() -> dict[str, object]:
+    payload = valid_pending_gate()
+    payload.update(
+        {
+            "status": "confirmed",
+            "confirmed_by": "reviewer",
+            "confirmed_at": "2026-08-27T00:00:00Z",
+            "artifact_hashes": ["a" * 64],
+        }
+    )
+    return payload
+
+
+def valid_iteration() -> dict[str, object]:
+    return {
+        "schema_version": "2",
+        "project_id": "example-project",
+        "active_iteration": "v001",
+        "question_sources": {"Q1": "v001"},
+        "gates": {"gate1": "pending", "gate2": "pending", "gate3": "pending"},
+        "status": "in_progress",
+        "updated_at": "2026-08-27T00:00:00Z",
+    }
+
+
+def valid_manifest() -> dict[str, object]:
+    return {
+        "schema_version": "2",
+        "manifest_type": "input",
+        "created_at": "2026-08-27T00:00:00Z",
+        "entries": [{"path": "input/problem.pdf", "sha256": "a" * 64}],
+    }
+
+
 def load_schema(kind: str) -> dict[str, object]:
     return json.loads(
         SCHEMAS.joinpath(f"{kind}.schema.json").read_text(encoding="utf-8")
@@ -208,6 +242,28 @@ class HandoffSchemaTests(unittest.TestCase):
         errors = validate_document(payload, kind="handoff", mode="runtime")
         self.assertTrue(any("manual-review" in error for error in errors))
 
+    def test_non_revision_rejects_unknown_recommended_stage(self) -> None:
+        payload = valid_handoff()
+        payload["next"]["recommended_stage"] = "manual-review"
+        errors = validate_document(payload, kind="handoff", mode="runtime")
+        self.assertTrue(any("manual-review" in error for error in errors))
+
+    def test_non_revision_accepts_complete_recommended_stage(self) -> None:
+        payload = valid_handoff()
+        payload["next"]["recommended_stage"] = "complete"
+        self.assertEqual([], validate_document(payload, kind="handoff", mode="runtime"))
+
+    def test_schema_defines_unified_recommended_stage_enum(self) -> None:
+        schema = load_schema("handoff")
+        self.assertEqual(
+            [*schema["$defs"]["stage"]["enum"], "complete"],
+            schema["$defs"]["recommendedStage"]["enum"],
+        )
+        self.assertEqual(
+            {"anyOf": [{"type": "null"}, {"$ref": "#/$defs/recommendedStage"}]},
+            schema["properties"]["next"]["properties"]["recommended_stage"],
+        )
+
     def test_schema_encodes_stage_aware_needs_revision_conditions(self) -> None:
         schema = load_schema("handoff")
         conditions = schema["allOf"]
@@ -259,6 +315,61 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertEqual(
             "string", rejected["then"]["properties"]["rollback_stage"]["type"]
         )
+
+    def test_confirmed_gate_accepts_utc_hash_evidence(self) -> None:
+        self.assertEqual([], validate_document(valid_confirmed_gate(), kind="gate"))
+
+    def test_confirmed_gate_rejects_non_utc_timestamp(self) -> None:
+        payload = valid_confirmed_gate()
+        payload["confirmed_at"] = "2026-08-27T08:00:00+08:00"
+        errors = validate_document(payload, kind="gate")
+        self.assertTrue(any("confirmed_at" in error for error in errors))
+
+    def test_gate_schema_confirmed_fields_are_nonempty_utc_and_hashed(self) -> None:
+        schema = load_schema("gate")
+        confirmed = schema["allOf"][0]["then"]["properties"]
+        self.assertEqual(1, confirmed["confirmed_by"]["minLength"])
+        self.assertEqual("\\S", confirmed["confirmed_by"]["pattern"])
+        self.assertEqual("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$", confirmed["confirmed_at"]["pattern"])
+
+    def test_iteration_rejects_non_utc_updated_at(self) -> None:
+        payload = valid_iteration()
+        payload["updated_at"] = "2026-08-27T08:00:00+08:00"
+        errors = validate_document(payload, kind="iteration")
+        self.assertTrue(any("updated_at" in error for error in errors))
+
+    def test_manifest_rejects_non_utc_created_at(self) -> None:
+        payload = valid_manifest()
+        payload["created_at"] = "2026-08-27T08:00:00+08:00"
+        errors = validate_document(payload, kind="manifest")
+        self.assertTrue(any("created_at" in error for error in errors))
+
+    def test_schema_timestamps_require_utc_z(self) -> None:
+        utc_pattern = "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$"
+        self.assertEqual(utc_pattern, load_schema("iteration")["properties"]["updated_at"]["pattern"])
+        self.assertEqual(utc_pattern, load_schema("manifest")["properties"]["created_at"]["pattern"])
+        self.assertEqual(utc_pattern, load_schema("gate")["properties"]["confirmed_at"]["pattern"])
+
+    def test_manifest_schema_uses_recursive_nonempty_evidence_values(self) -> None:
+        schema = load_schema("manifest")
+        self.assertEqual(
+            {"$ref": "#/$defs/evidenceValue"},
+            schema["properties"]["entries"]["items"]["additionalProperties"],
+        )
+        self.assertIn(
+            {"type": "string", "minLength": 1, "pattern": "\\S"},
+            schema["$defs"]["evidenceValue"]["oneOf"],
+        )
+
+    def test_manifest_rejects_empty_nested_entry_evidence(self) -> None:
+        payload = valid_manifest()
+        payload["entries"][0]["metadata"] = {"source": ""}
+        errors = validate_document(payload, kind="manifest")
+        self.assertTrue(any("entries[0].metadata.source" in error for error in errors))
+
+    def test_iteration_schema_requires_nonempty_project_id(self) -> None:
+        schema = load_schema("iteration")
+        self.assertEqual("\\S", schema["properties"]["project_id"]["pattern"])
 
     def test_v1_minimal_handoff_migrates_without_losing_task_text(self) -> None:
         legacy = {

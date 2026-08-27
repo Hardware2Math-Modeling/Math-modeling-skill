@@ -10,7 +10,7 @@
     "gate_id": {"enum": ["gate1", "gate2", "gate3"]},
     "status": {"enum": ["pending", "confirmed", "rejected"]},
     "confirmed_by": {"type": ["string", "null"], "minLength": 1, "pattern": "\\S"},
-    "confirmed_at": {"type": ["string", "null"], "format": "date-time"},
+    "confirmed_at": {"type": ["string", "null"], "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$"},
     "artifact_hashes": {
       "type": "array",
       "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -29,8 +29,8 @@
       },
       "then": {
         "properties": {
-          "confirmed_by": {"type": "string"},
-          "confirmed_at": {"type": "string"},
+          "confirmed_by": {"type": "string", "minLength": 1, "pattern": "\\S"},
+          "confirmed_at": {"type": "string", "minLength": 1, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$"},
           "artifact_hashes": {"minItems": 1}
         }
       }
@@ -40,7 +40,7 @@
         "properties": {"status": {"const": "rejected"}}
       },
       "then": {
-        "properties": {"rollback_stage": {"type": "string"}}
+        "properties": {"rollback_stage": {"type": "string", "enum": ["preflight", "problem-analysis", "data-analysis", "model-construction", "model-solving", "visualization", "validation", "paper-writing", "paper-production"]}}
       }
     }
   ]

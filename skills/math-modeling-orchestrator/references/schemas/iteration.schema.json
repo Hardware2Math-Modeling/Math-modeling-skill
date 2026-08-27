@@ -25,7 +25,7 @@
       }
     },
     "status": {"enum": ["pending", "in_progress", "complete", "needs_revision", "stale"]},
-    "updated_at": {"type": "string", "format": "date-time"}
+    "updated_at": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$"}
   },
   "$defs": {
     "gateStatus": {"enum": ["pending", "confirmed", "rejected", "stale"]}
