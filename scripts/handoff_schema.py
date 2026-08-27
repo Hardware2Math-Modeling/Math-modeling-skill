@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import re
 from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -159,18 +160,40 @@ def _evidence_array(value: object, path: str, errors: list[str]) -> None:
         if type(item) is not dict or not item:
             errors.append(f"{item_path} must be a non-empty object")
             continue
-        _reject_empty_strings(item, item_path, errors)
+        _evidence_value(item, item_path, errors)
 
 
-def _reject_empty_strings(value: object, path: str, errors: list[str]) -> None:
-    if _is_string(value) and not value.strip():
-        errors.append(f"{path} must not be an empty string")
-    elif type(value) is list:
+def _evidence_value(value: object, path: str, errors: list[str]) -> None:
+    """Validate one recursive evidence value against strict JSON types."""
+
+    if _is_string(value):
+        if not value.strip():
+            errors.append(f"{path} must not be an empty string")
+        return
+    if value is None or type(value) is bool or type(value) is int:
+        return
+    if type(value) is float:
+        if not math.isfinite(value):
+            errors.append(f"{path} must be a finite JSON number")
+        return
+    if type(value) is list:
         for index, item in enumerate(value):
-            _reject_empty_strings(item, f"{path}[{index}]", errors)
-    elif type(value) is dict:
-        for key in sorted(value):
-            _reject_empty_strings(value[key], _path(path, str(key)), errors)
+            _evidence_value(item, f"{path}[{index}]", errors)
+        return
+    if type(value) is dict:
+        # Validate keys before traversing values.  Never sort a mixed-key dict;
+        # sorting only the string keys keeps errors deterministic and avoids
+        # TypeError from comparing unlike key types.
+        string_keys: list[str] = []
+        for key in value:
+            if type(key) is not str:
+                errors.append(f"{path} must use a string key (found {type(key).__name__})")
+            else:
+                string_keys.append(key)
+        for key in sorted(string_keys):
+            _evidence_value(value[key], _path(path, key), errors)
+        return
+    errors.append(f"{path} must contain only strict JSON values")
 
 
 def _safe_relative_path(value: object, path: str, errors: list[str]) -> None:

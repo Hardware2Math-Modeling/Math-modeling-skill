@@ -23,6 +23,7 @@ from handoff_schema import (  # noqa: E402
     migrate_payload,
     validate_document,
 )
+from migrate_handoff import serialize_payload  # noqa: E402
 
 
 def valid_handoff() -> dict[str, object]:
@@ -153,6 +154,39 @@ class HandoffSchemaTests(unittest.TestCase):
         ]
         errors = validate_document(payload, kind="handoff")
         self.assertTrue(any("context.decisions[0].nested.reason" in error for error in errors))
+
+    def test_direct_evidence_rejects_nonfinite_nan(self) -> None:
+        payload = valid_handoff_with_computed_value()
+        payload["result"]["computed_values"][0]["value"] = float("nan")
+        errors = validate_document(payload, kind="handoff")
+        self.assertTrue(any("result.computed_values[0].value" in error for error in errors))
+
+    def test_direct_evidence_rejects_nonfinite_infinity(self) -> None:
+        payload = valid_handoff_with_computed_value()
+        payload["result"]["computed_values"][0]["value"] = float("inf")
+        errors = validate_document(payload, kind="handoff")
+        self.assertTrue(any("result.computed_values[0].value" in error for error in errors))
+
+    def test_direct_evidence_rejects_non_json_set(self) -> None:
+        payload = valid_handoff_with_computed_value()
+        payload["result"]["computed_values"][0]["value"] = {"not-json"}
+        errors = validate_document(payload, kind="handoff")
+        self.assertTrue(any("result.computed_values[0].value" in error for error in errors))
+
+    def test_direct_evidence_rejects_non_json_tuple(self) -> None:
+        payload = valid_handoff_with_computed_value()
+        payload["result"]["computed_values"][0]["value"] = (1, 2)
+        errors = validate_document(payload, kind="handoff")
+        self.assertTrue(any("result.computed_values[0].value" in error for error in errors))
+
+    def test_evidence_mixed_key_types_report_deterministic_error(self) -> None:
+        payload = valid_handoff_with_computed_value()
+        payload["result"]["computed_values"][0]["value"] = {1: "x", "a": "y"}
+        first = validate_document(payload, kind="handoff")
+        second = validate_document(payload, kind="handoff")
+        self.assertEqual(first, second)
+        self.assertTrue(any("result.computed_values[0].value" in error for error in first))
+        self.assertTrue(any("string key" in error for error in first))
 
     def test_schema_recursively_rejects_empty_evidence_strings(self) -> None:
         schema = load_schema("handoff")
@@ -521,9 +555,109 @@ class HandoffSchemaTests(unittest.TestCase):
             self.assertIn("non-standard JSON constant", result.stderr)
             self.assertFalse(output_path.exists())
 
+    def test_migration_cli_rejects_artifact_symlink_escape(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            project = base / "project"
+            external = base / "external"
+            project.mkdir()
+            external.mkdir()
+            external.joinpath("result.json").write_text("{}", encoding="utf-8")
+            try:
+                project.joinpath("artifacts").symlink_to(external, target_is_directory=True)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+            legacy = {
+                "schema_version": "1",
+                "task": {"statement": "legacy task"},
+                "state": {"current_stage": "model-solving"},
+                "result": {},
+                "next": {},
+                "artifacts": [
+                    {
+                        "path": "artifacts/result.json",
+                        "kind": "result",
+                        "description": "external evidence",
+                    }
+                ],
+            }
+            input_path = project / "legacy.json"
+            output_path = project / "v2.json"
+            input_path.write_text(json.dumps(legacy), encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "migrate_handoff.py"),
+                    "--input",
+                    str(input_path),
+                    "--output",
+                    str(output_path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+            self.assertIn("symlink", result.stderr)
+            self.assertFalse(output_path.exists())
+
+    def test_migration_cli_rejects_symlinked_output_parent(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            project = base / "project"
+            outside = base / "outside"
+            project.mkdir()
+            outside.mkdir()
+            try:
+                project.joinpath("linked-output").symlink_to(outside, target_is_directory=True)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+            legacy_path = project / "legacy.json"
+            legacy_path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": "1",
+                        "task": {"statement": "legacy task"},
+                        "state": {"current_stage": "model-solving"},
+                        "result": {},
+                        "next": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            output_path = project / "linked-output" / "v2.json"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPTS / "migrate_handoff.py"),
+                    "--input",
+                    str(legacy_path),
+                    "--output",
+                    str(output_path),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+            self.assertEqual(1, result.returncode, result.stdout + result.stderr)
+            self.assertIn("symlink", result.stderr)
+            self.assertFalse(outside.joinpath("v2.json").exists())
+
     def test_migration_serialization_disallows_nonstandard_constants(self) -> None:
-        source = SCRIPTS.joinpath("migrate_handoff.py").read_text(encoding="utf-8")
-        self.assertIn("allow_nan=False", source)
+        migrated = migrate_payload(
+            {
+                "schema_version": "1",
+                "task": {"statement": "legacy task"},
+                "state": {"current_stage": "model-solving"},
+                "result": {},
+                "next": {},
+            }
+        )
+        migrated["result"]["computed_values"] = [
+            {"name": "objective", "value": float("nan")}
+        ]
+        with self.assertRaisesRegex(ValueError, "JSON"):
+            serialize_payload(migrated, pretty=False)
 
     def test_load_and_validate_rejects_artifact_symlink_escape(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

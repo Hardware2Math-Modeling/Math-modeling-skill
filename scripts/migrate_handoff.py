@@ -10,10 +10,30 @@ import sys
 import tempfile
 from pathlib import Path
 
-from handoff_schema import load_json_strict, migrate_payload, validate_document
+from handoff_schema import load_and_validate
+from suite_validation import ensure_no_symlink_components
+
+
+def serialize_payload(payload: object, *, pretty: bool = False) -> str:
+    """Serialize payload as strict UTF-8 JSON text."""
+
+    try:
+        return json.dumps(
+            payload,
+            ensure_ascii=False,
+            indent=2 if pretty else None,
+            sort_keys=True,
+            allow_nan=False,
+        ) + "\n"
+    except (TypeError, ValueError) as error:
+        raise ValueError(f"payload cannot be serialized as strict JSON: {error}") from error
 
 
 def _write_new_atomically(path: Path, content: str) -> None:
+    try:
+        path = ensure_no_symlink_components(path, "output")
+    except ValueError as error:
+        raise ValueError(str(error).replace("symbolic link", "symlink")) from error
     if path.exists() or path.is_symlink():
         raise FileExistsError(f"output already exists: {path}")
     if not path.parent.is_dir():
@@ -52,18 +72,8 @@ def main() -> int:
     try:
         if args.output.exists() or args.output.is_symlink():
             raise FileExistsError(f"output already exists: {args.output}")
-        payload = load_json_strict(args.input)
-        migrated = migrate_payload(payload)
-        errors = validate_document(migrated, kind="handoff", mode="runtime")
-        if errors:
-            raise ValueError("migrated handoff is invalid:\n- " + "\n- ".join(errors))
-        content = json.dumps(
-            migrated,
-            ensure_ascii=False,
-            indent=2 if args.pretty else None,
-            sort_keys=True,
-            allow_nan=False,
-        ) + "\n"
+        migrated = load_and_validate(args.input, kind="handoff", mode="legacy")
+        content = serialize_payload(migrated, pretty=args.pretty)
         _write_new_atomically(args.output, content)
     except (OSError, UnicodeError, json.JSONDecodeError, TypeError, ValueError) as error:
         print(f"handoff migration failed: {error}", file=sys.stderr)
