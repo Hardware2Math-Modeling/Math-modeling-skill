@@ -181,6 +181,14 @@ _EXPECTED_GUARDS = {
     },
 }
 _WORKFLOW_GUARD_KEYS = set(_EXPECTED_GUARDS)
+_SUPPORT_RESOURCE_BOUNDARY = (
+    "## Resource boundary\n\nCatalog/reference resources are read-only."
+)
+_SUPPORT_STATE_BOUNDARY = "## State boundary\n\nMust not write project state."
+_SUPPORT_STATE_PERMISSION_RE = re.compile(
+    r"\b(?:may|can|allowed to)\s+write\s+project\s+state\b",
+    re.IGNORECASE,
+)
 _WORKFLOW_HANDOFF_KEYS = {
     "required_fields",
     "statuses",
@@ -231,6 +239,23 @@ def _read_json_object(path: Path, errors: list[str], label: str) -> tuple[dict[s
 
 def _is_nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _exact_value_equal(actual: Any, expected: Any) -> bool:
+    """Compare JSON-like values without treating booleans as integers."""
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return set(actual) == set(expected) and all(
+            _exact_value_equal(actual[key], value)
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _exact_value_equal(actual_item, expected_item)
+            for actual_item, expected_item in zip(actual, expected)
+        )
+    return actual == expected
 
 
 def _lexical_absolute(path: Path) -> Path:
@@ -680,11 +705,16 @@ def _validate_skills(root: Path, errors: list[str]) -> None:
                     if stage not in text:
                         errors.append(f"{label} must mention {stage}")
             elif skill in SUPPORT_SKILLS:
-                lowered = text.lower()
-                if "read-only" not in lowered or "project state" not in lowered:
+                if _SUPPORT_RESOURCE_BOUNDARY not in text:
                     errors.append(
-                        f"{label} must define a read-only catalog/reference boundary "
-                        "and must not write project state"
+                        f"{label} must define a read-only catalog/reference resource boundary"
+                    )
+                if (
+                    _SUPPORT_STATE_BOUNDARY not in text
+                    or _SUPPORT_STATE_PERMISSION_RE.search(text)
+                ):
+                    errors.append(
+                        f"{label} must explicitly state it must not write project state"
                     )
             elif "../math-modeling-orchestrator/references/handoff-contract.md" not in text:
                 errors.append(f"{label} must reference shared handoff contract")
@@ -808,7 +838,7 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
                     f"workflow guard {guard_name} contains unsupported keys: "
                     + ", ".join(unexpected_guard)
                 )
-            if guard != expected_guard:
+            if not _exact_value_equal(guard, expected_guard):
                 errors.append(f"workflow guard {guard_name} must match its required contract")
 
     handoff = workflow.get("handoff")

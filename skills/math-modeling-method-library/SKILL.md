@@ -5,7 +5,7 @@ description: Use when a modeling stage needs a bounded comparison of candidate m
 
 # Mathematical Modeling Method Library
 
-Provide read-only catalog/reference support to a modeling stage. The calling stage remains responsible for evidence, selection, implementation, and workflow status.
+Provide bounded method comparisons to a modeling stage. The calling stage remains responsible for evidence, selection, implementation, and workflow status.
 
 ## Responsibilities
 
@@ -14,6 +14,10 @@ Provide read-only catalog/reference support to a modeling stage. The calling sta
 - Separate established method properties from task-specific judgments and expose any missing evidence that would change the comparison.
 - Return references or bounded recommendations to the caller without presenting a catalog entry as a selected or validated model.
 
-## Boundary
+## Resource boundary
 
-This support skill is read-only: it must not write project state, mutate a handoff, advance a workflow stage, execute project code, or create competition artifacts. It does not replace problem analysis, model construction, solving, validation, or user judgment.
+Catalog/reference resources are read-only. This skill may inspect them but must not edit, replace, or extend them during a modeling task.
+
+## State boundary
+
+Must not write project state. This skill must not mutate a handoff, advance a workflow stage, execute project code, or create competition artifacts. It does not replace problem analysis, model construction, solving, validation, or user judgment.

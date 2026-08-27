@@ -67,7 +67,12 @@ def make_valid_suite(root):
         skill_dir.mkdir(parents=True, exist_ok=True)
         body = "\n".join(f"- {stage}" for stage in EXPECTED_WORKFLOW_STAGE_SKILLS)
         if skill in EXPECTED_SUPPORT_SKILLS:
-            body = "Read-only catalog/reference support. Do not write project state."
+            body = (
+                "## Resource boundary\n\n"
+                "Catalog/reference resources are read-only.\n\n"
+                "## State boundary\n\n"
+                "Must not write project state."
+            )
         elif skill != "math-modeling-orchestrator":
             body = "See ../math-modeling-orchestrator/references/handoff-contract.md."
         skill_dir.joinpath("SKILL.md").write_text(
@@ -306,7 +311,7 @@ class SuiteValidationTests(unittest.TestCase):
             )
             method_library.write_text(
                 method_library.read_text(encoding="utf-8").replace(
-                    "Read-only catalog/reference support. Do not write project state.",
+                    "Catalog/reference resources are read-only.",
                     "Reusable modeling methods.",
                 ),
                 encoding="utf-8",
@@ -314,6 +319,25 @@ class SuiteValidationTests(unittest.TestCase):
             self.assertTrue(
                 any(
                     "read-only catalog/reference" in error
+                    for error in validate_suite(root)
+                )
+            )
+
+    def test_support_skill_rejects_contradictory_project_state_permission(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            method_library = (
+                root / "skills" / "math-modeling-method-library" / "SKILL.md"
+            )
+            method_library.write_text(
+                method_library.read_text(encoding="utf-8")
+                + "\nThis skill may write project state.\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                any(
+                    "must not write project state" in error
                     for error in validate_suite(root)
                 )
             )
@@ -486,6 +510,34 @@ class SuiteValidationTests(unittest.TestCase):
                         f"workflow guard {guard_name} contains unsupported keys: unexpected",
                         validate_suite(root),
                     )
+
+    def test_all_guard_booleans_reject_integer_substitutes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            workflow_path = root / "skills" / "math-modeling-orchestrator" / "references" / "workflow.json"
+            workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+            boolean_fields = [
+                (guard_name, field_name, value)
+                for guard_name, guard in workflow["guards"].items()
+                for field_name, value in guard.items()
+                if type(value) is bool
+            ]
+            self.assertTrue(boolean_fields)
+            for guard_name, field_name, _ in boolean_fields:
+                for integer_value in (0, 1):
+                    with self.subTest(
+                        guard=guard_name,
+                        field=field_name,
+                        substitute=integer_value,
+                    ):
+                        mutated = json.loads(json.dumps(workflow))
+                        mutated["guards"][guard_name][field_name] = integer_value
+                        write_json(workflow_path, mutated)
+                        self.assertIn(
+                            f"workflow guard {guard_name} must match its required contract",
+                            validate_suite(root),
+                        )
 
     def test_skill_description_must_be_trigger_oriented(self):
         with tempfile.TemporaryDirectory() as directory:
