@@ -99,6 +99,20 @@ def _is_nonempty_string(value: object) -> bool:
     return _is_string(value) and bool(value.strip())
 
 
+def _string_mapping_keys(
+    value: dict[object, object], path: str, errors: list[str]
+) -> list[str]:
+    """Return string keys in lexical order and reject all other key types."""
+
+    invalid_types = sorted(
+        {type(key).__name__ for key in value if type(key) is not str}
+    )
+    for type_name in invalid_types:
+        marker = f"<key:{type_name}>"
+        errors.append(f"{_path(path, marker)} must be a string key")
+    return sorted(key for key in value if type(key) is str)
+
+
 def _object(
     value: object,
     *,
@@ -114,8 +128,9 @@ def _object(
     for field in required:
         if field not in result:
             errors.append(f"{_path(path, field)} is required")
-    for field in sorted(set(result) - set(allowed)):
-        errors.append(f"{_path(path, field)} is not allowed")
+    for field in _string_mapping_keys(result, path, errors):
+        if field not in allowed:
+            errors.append(f"{_path(path, field)} is not allowed")
     return result
 
 
@@ -204,14 +219,7 @@ def _evidence_value(
             return
         active_containers.add(identity)
         try:
-            invalid_types = sorted(
-                {type(key).__name__ for key in value if type(key) is not str}
-            )
-            for type_name in invalid_types:
-                errors.append(
-                    f"{path} must use a string key (found {type_name})"
-                )
-            for key in sorted(key for key in value if type(key) is str):
+            for key in _string_mapping_keys(value, path, errors):
                 _evidence_value(
                     value[key], _path(path, key), errors, active_containers
                 )
@@ -431,9 +439,9 @@ def _validate_iteration(payload: object, errors: list[str]) -> None:
     if type(sources) is not dict:
         errors.append("question_sources must be an object")
     else:
-        for question in sorted(sources):
+        for question in _string_mapping_keys(sources, "question_sources", errors):
             value = sources[question]
-            if _QUESTION_RE.fullmatch(str(question)) is None:
+            if _QUESTION_RE.fullmatch(question) is None:
                 errors.append(f"question_sources.{question} must use a Q<number> key")
             if not _is_string(value) or _ITERATION_RE.fullmatch(value) is None:
                 errors.append(f"question_sources.{question} must match vNNN")

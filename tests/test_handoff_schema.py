@@ -119,6 +119,22 @@ class HandoffSchemaTests(unittest.TestCase):
         errors = validate_document(payload, kind="handoff", mode="runtime")
         self.assertTrue(any("schema_version" in error for error in errors))
 
+    def test_direct_payload_rejects_non_string_root_key(self) -> None:
+        payload = valid_handoff()
+        payload[1] = "not-json"
+        payload["unexpected"] = "also invalid"
+        errors = validate_document(payload, kind="handoff")
+        self.assertTrue(any("<key:int>" in error for error in errors))
+        self.assertTrue(any("string key" in error for error in errors))
+
+    def test_direct_payload_rejects_non_string_nested_object_key(self) -> None:
+        payload = valid_handoff()
+        payload["task"][1] = "not-json"
+        payload["task"]["unexpected"] = "also invalid"
+        errors = validate_document(payload, kind="handoff")
+        self.assertTrue(any("task.<key:int>" in error for error in errors))
+        self.assertTrue(any("string key" in error for error in errors))
+
     def test_runtime_rejects_legacy_schema_version(self) -> None:
         payload = valid_handoff()
         payload["schema_version"] = "1"
@@ -419,6 +435,19 @@ class HandoffSchemaTests(unittest.TestCase):
         payload["updated_at"] = "2026-08-27T08:00:00+08:00"
         errors = validate_document(payload, kind="iteration")
         self.assertTrue(any("updated_at" in error for error in errors))
+
+    def test_iteration_question_sources_rejects_mixed_key_types(self) -> None:
+        payload = valid_iteration()
+        payload["question_sources"] = {
+            "Q1": "v001",
+            1: "v001",
+            (2,): "v001",
+        }
+        first = validate_document(payload, kind="iteration")
+        second = validate_document(payload, kind="iteration")
+        self.assertEqual(first, second)
+        self.assertTrue(any("question_sources.<key:int>" in error for error in first))
+        self.assertTrue(any("question_sources.<key:tuple>" in error for error in first))
 
     def test_iteration_rejects_impossible_utc_timestamp(self) -> None:
         payload = valid_iteration()
