@@ -36,6 +36,17 @@ def valid_handoff_with_computed_value() -> dict[str, object]:
     return payload
 
 
+def valid_legacy_handoff() -> dict[str, object]:
+    return {
+        "schema_version": "1",
+        "task": {"statement": "legacy task"},
+        "state": {"current_stage": "model-solving"},
+        "context": {"assumptions": []},
+        "result": {},
+        "next": {},
+    }
+
+
 def valid_needs_revision() -> dict[str, object]:
     payload = valid_handoff()
     payload["state"]["status"] = "needs_revision"
@@ -150,6 +161,55 @@ class HandoffSchemaTests(unittest.TestCase):
             "next": {},
         }
         self.assertEqual([], validate_document(legacy, kind="handoff", mode="legacy"))
+
+    def test_legacy_mode_rejects_non_string_root_key_before_migration(self) -> None:
+        legacy = valid_legacy_handoff()
+        legacy[1] = "not-json"
+        errors = validate_document(legacy, kind="handoff", mode="legacy")
+        self.assertEqual(errors, validate_document(legacy, kind="handoff", mode="legacy"))
+        self.assertTrue(any("<key:int>" in error for error in errors))
+        with self.assertRaisesRegex(ValueError, "string key"):
+            migrate_payload(legacy)
+
+    def test_legacy_mode_rejects_non_string_task_key_before_migration(self) -> None:
+        legacy = valid_legacy_handoff()
+        legacy["task"][1] = "not-json"
+        errors = validate_document(legacy, kind="handoff", mode="legacy")
+        self.assertTrue(any("task.<key:int>" in error for error in errors))
+        with self.assertRaisesRegex(ValueError, "string key"):
+            migrate_payload(legacy)
+
+    def test_legacy_mode_rejects_evidence_reference_cycle_before_migration(self) -> None:
+        legacy = valid_legacy_handoff()
+        cyclic: dict[str, object] = {}
+        cyclic["self"] = cyclic
+        legacy["context"]["assumptions"] = [cyclic]
+        errors = validate_document(legacy, kind="handoff", mode="legacy")
+        self.assertTrue(
+            any(
+                "context.assumptions[0].self" in error
+                and "reference cycle" in error
+                for error in errors
+            )
+        )
+        with self.assertRaisesRegex(ValueError, "reference cycle"):
+            migrate_payload(legacy)
+
+    def test_legacy_mode_rejects_evidence_set_before_migration(self) -> None:
+        legacy = valid_legacy_handoff()
+        legacy["context"]["assumptions"] = [{"value": {"not-json"}}]
+        errors = validate_document(legacy, kind="handoff", mode="legacy")
+        self.assertTrue(any("context.assumptions[0].value" in error for error in errors))
+        with self.assertRaisesRegex(ValueError, "strict JSON"):
+            migrate_payload(legacy)
+
+    def test_legacy_mode_rejects_evidence_nan_before_migration(self) -> None:
+        legacy = valid_legacy_handoff()
+        legacy["context"]["assumptions"] = [{"value": float("nan")}]
+        errors = validate_document(legacy, kind="handoff", mode="legacy")
+        self.assertTrue(any("context.assumptions[0].value" in error for error in errors))
+        with self.assertRaisesRegex(ValueError, "finite JSON number"):
+            migrate_payload(legacy)
 
     def test_empty_task_statement_is_rejected(self) -> None:
         payload = valid_handoff()
@@ -303,6 +363,16 @@ class HandoffSchemaTests(unittest.TestCase):
             "artifacts/\x00x",
         ):
             with self.subTest(path=invalid):
+                self.assertIsNone(re.fullmatch(pattern, invalid))
+
+    def test_schema_and_runtime_reject_whitespace_only_relative_paths(self) -> None:
+        pattern = load_schema("handoff")["$defs"]["relativePath"]["pattern"]
+        for invalid in ("   ", "\t"):
+            with self.subTest(path=invalid):
+                payload = valid_handoff()
+                payload["artifacts"][0]["path"] = invalid
+                errors = validate_document(payload, kind="handoff")
+                self.assertTrue(any("artifacts[0].path" in error for error in errors))
                 self.assertIsNone(re.fullmatch(pattern, invalid))
 
     def test_valid_needs_revision_is_accepted(self) -> None:

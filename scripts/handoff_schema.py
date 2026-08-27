@@ -113,6 +113,53 @@ def _string_mapping_keys(
     return sorted(key for key in value if type(key) is str)
 
 
+def _strict_json_tree_errors(value: object) -> list[str]:
+    """Return deterministic errors for values outside the strict JSON tree."""
+
+    errors: list[str] = []
+    active_containers: set[int] = set()
+
+    def visit(item: object, path: str) -> None:
+        label = path or "$"
+        if type(item) is str or item is None or type(item) is bool or type(item) is int:
+            return
+        if type(item) is float:
+            if not math.isfinite(item):
+                errors.append(f"{label} must be a finite JSON number")
+            return
+        if type(item) is list:
+            identity = id(item)
+            if identity in active_containers:
+                errors.append(f"{label} must not contain a reference cycle")
+                return
+            active_containers.add(identity)
+            try:
+                for index, child in enumerate(item):
+                    visit(child, f"{path}[{index}]")
+            finally:
+                active_containers.remove(identity)
+            return
+        if type(item) is dict:
+            identity = id(item)
+            if identity in active_containers:
+                errors.append(f"{label} must not contain a reference cycle")
+                return
+            active_containers.add(identity)
+            try:
+                for key in _string_mapping_keys(item, path, errors):
+                    visit(item[key], _path(path, key))
+            finally:
+                active_containers.remove(identity)
+            return
+        errors.append(
+            f"{label} must contain only strict JSON values "
+            f"(found {type(item).__name__})"
+        )
+
+    visit(value, "")
+    return errors
+
+
 def _object(
     value: object,
     *,
@@ -547,6 +594,9 @@ def validate_document(
     if mode == "legacy":
         if kind != "handoff":
             raise ValueError("legacy mode is only supported for handoff documents")
+        raw_errors = _strict_json_tree_errors(payload)
+        if raw_errors:
+            return raw_errors
         if type(payload) is dict and payload.get("schema_version") == "1":
             try:
                 candidate = migrate_payload(payload)
@@ -587,6 +637,9 @@ def migrate_payload(payload: dict[str, object]) -> dict[str, object]:
 
     if type(payload) is not dict:
         raise ValueError("legacy handoff must be an object")
+    raw_errors = _strict_json_tree_errors(payload)
+    if raw_errors:
+        raise ValueError("legacy handoff is not strict JSON:\n- " + "\n- ".join(raw_errors))
     version = payload.get("schema_version")
     if version == "2" and _is_string(version):
         return copy.deepcopy(payload)
