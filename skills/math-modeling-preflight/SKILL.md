@@ -1,27 +1,34 @@
 ---
 name: math-modeling-preflight
-description: Use when a mathematical modeling task must verify its inputs, project location, requested deliverables, and available Python or LaTeX environment before analysis begins.
+description: Use when starting or resuming mathematical modeling work that needs verified project inputs, an explicit Python environment, dependency checks, or paper-tool readiness before analysis.
 ---
 
 # Mathematical Modeling Preflight
 
-Establish whether the task can start reproducibly without installing software or changing the supplied evidence.
+Establish a reproducible environment boundary before any problem analysis or model work. Read [the shared handoff contract](../math-modeling-orchestrator/references/handoff-contract.md) before returning workflow state.
 
-## Input
+## Mandatory boundary
 
-Accept the original task materials and any user-specified project, interpreter, template, or output paths. Read [the shared handoff contract](../math-modeling-orchestrator/references/handoff-contract.md) before returning workflow state.
+Ask the user for all of the following:
 
-## Responsibilities
+- the absolute path to the Python executable they chose;
+- the absolute project root;
+- the competition and requested deliverables;
+- the user template's absolute path, or explicit confirmation that none is available.
 
-- Inventory the supplied problem statement, attachments, data, templates, requested deliverables, and explicit constraints.
-- Record absolute project and tool paths when supplied, and distinguish verified availability from user assertions or untested assumptions.
-- Check whether the requested work depends on Python, packages, or a LaTeX toolchain and report missing prerequisites with concrete next actions.
-- Preserve all inputs as evidence; do not modify them, install dependencies, or invent substitute data or templates.
+Do not begin analysis, data processing, method selection, modeling, solving, or plotting until the user supplies the absolute Python path and preflight passes. A relative name such as `python3`, resolving one with `command -v`, or creating a virtual environment is not a substitute. Urgency, sunk work, or a teammate's blanket approval does not relax this boundary.
 
-## Boundaries
+## Diagnose without mutation
 
-Do not analyze the modeling problem, choose methods, execute a model, create figures, or draft a paper. Environment readiness is not evidence that later modeling stages are valid.
+- Probe exactly the supplied interpreter for executable identity, Python version, platform, and the task's required package versions.
+- Check LaTeX tools in this order: `tectonic`, `latexmk`, `xelatex`, `pdflatex`. No tool is a warning for result-only work and a blocker when paper production is requested.
+- Inventory problem files, attachments, constraints, and deliverables without modifying source evidence.
+- Treat an absent requested template as `fallback_non_submission`, not a preflight error; record that the fallback is unofficial and not submission-ready.
+
+Never choose another interpreter, create an environment, invoke pip, install or downgrade packages, or change external state. For each missing package, return an installation command using the exact supplied interpreter, ask the user to approve and run it, then rerun preflight. Do not treat installation advice as a successful check.
 
 ## Output
 
-Return an updated handoff with `state.current_stage` set to `preflight` and a justified `complete` or `needs_revision` status. Record the inventory, checked paths, environment findings, deliverable request, and blockers in `result`. Put uncertainty in `quality.warnings`, set `quality.confidence` from observed evidence, explain the next route in `next.rationale`, and list viable alternatives in `next.alternatives`.
+Return a schema-version `"2"` handoff with `state.current_stage` set to `preflight`. Mark it `complete` only when the supplied Python identity passes, required packages are present, and any paper-production tool requirement is satisfied; otherwise use `needs_revision`, keep `next.recommended_stage` at `preflight`, and list every blocker in `next.failed_checks`.
+
+Record the input inventory, environment diagnosis, template status, and requested deliverables in `result`; list only materialized input/environment/template reports in `artifacts`. Put non-blocking limitations in `quality.warnings`, set `quality.confidence` from observed evidence, explain the route in `next.rationale`, and keep bounded recovery choices in `next.alternatives`. Never invent a preflight artifact path.
