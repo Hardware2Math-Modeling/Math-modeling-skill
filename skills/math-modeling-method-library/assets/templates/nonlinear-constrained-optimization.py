@@ -21,6 +21,23 @@ def _project(values: list[float], bounds: list[tuple[float, float]], limit: floa
     return [min(high, max(low, value - right)) for value, (low, high) in zip(clipped, bounds)]
 
 
+def _finite_json_io(function: Any) -> Any:
+    def checked(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+        try:
+            json.dumps({"data": data, "config": config}, allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"solve input must be finite JSON: {error}") from error
+        result = function(data, config)
+        try:
+            json.dumps(result, allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"solve result must be finite JSON: {error}") from error
+        return result
+
+    return checked
+
+
+@_finite_json_io
 def solve(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     """Maximize a separable concave quadratic over box and sum constraints."""
     linear = [float(value) for value in data["linear"]]

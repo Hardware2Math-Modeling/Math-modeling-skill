@@ -10,6 +10,23 @@ def _cross(origin: tuple[float, float], left: tuple[float, float], right: tuple[
     return (left[0] - origin[0]) * (right[1] - origin[1]) - (left[1] - origin[1]) * (right[0] - origin[0])
 
 
+def _finite_json_io(function: Any) -> Any:
+    def checked(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+        try:
+            json.dumps({"data": data, "config": config}, allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"solve input must be finite JSON: {error}") from error
+        result = function(data, config)
+        try:
+            json.dumps(result, allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"solve result must be finite JSON: {error}") from error
+        return result
+
+    return checked
+
+
+@_finite_json_io
 def solve(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     """Return the counterclockwise two-dimensional convex hull vertices."""
     points = sorted({(float(point[0]), float(point[1])) for point in data["points"]})

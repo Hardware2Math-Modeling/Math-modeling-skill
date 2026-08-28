@@ -10,6 +10,23 @@ def _distance_squared(left: list[float], right: list[float]) -> float:
     return sum((a - b) ** 2 for a, b in zip(left, right))
 
 
+def _finite_json_io(function: Any) -> Any:
+    def checked(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+        try:
+            json.dumps({"data": data, "config": config}, allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"solve input must be finite JSON: {error}") from error
+        result = function(data, config)
+        try:
+            json.dumps(result, allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"solve result must be finite JSON: {error}") from error
+        return result
+
+    return checked
+
+
+@_finite_json_io
 def solve(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     """Cluster points with deterministic seeded farthest-first K-means."""
     points = [[float(value) for value in row] for row in data["points"]]

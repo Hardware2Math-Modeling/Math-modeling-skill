@@ -28,6 +28,23 @@ def _linear_system(matrix: list[list[float]], rhs: list[float]) -> list[float] |
     return [augmented[row][-1] for row in range(size)]
 
 
+def _finite_json_io(function: Any) -> Any:
+    def checked(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+        try:
+            json.dumps({"data": data, "config": config}, allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"solve input must be finite JSON: {error}") from error
+        result = function(data, config)
+        try:
+            json.dumps(result, allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"solve result must be finite JSON: {error}") from error
+        return result
+
+    return checked
+
+
+@_finite_json_io
 def solve(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     """Solve a small bounded nonnegative LP by enumerating feasible vertices."""
     c = [float(value) for value in data["c"]]

@@ -2,10 +2,28 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 from typing import Any
 
 
+def _finite_json_io(function: Any) -> Any:
+    def checked(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+        try:
+            json.dumps({"data": data, "config": config}, allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"solve input must be finite JSON: {error}") from error
+        result = function(data, config)
+        try:
+            json.dumps(result, allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"solve result must be finite JSON: {error}") from error
+        return result
+
+    return checked
+
+
+@_finite_json_io
 def solve(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     """Integrate symmetric-game replicator dynamics with explicit Euler steps."""
     payoff = [[float(value) for value in row] for row in data["payoff"]]
@@ -21,9 +39,14 @@ def solve(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     for _ in range(steps):
         fitness = [sum(value * share for value, share in zip(row, shares)) for row in payoff]
         average = sum(share * value for share, value in zip(shares, fitness))
-        updated = [max(0.0, share + dt * share * (value - average)) for share, value in zip(shares, fitness)]
+        raw_updated = [share + dt * share * (value - average) for share, value in zip(shares, fitness)]
+        scale = max(1.0, *(abs(value) for value in raw_updated))
+        roundoff = 64.0 * math.ulp(scale)
+        if any(value < -roundoff or value > 1.0 + roundoff for value in raw_updated):
+            raise ValueError("replicator Euler step left the probability simplex")
+        updated = [min(1.0, max(0.0, value)) for value in raw_updated]
         total = sum(updated)
-        if total <= 0:
+        if total <= 0 or abs(total - 1.0) > roundoff * len(updated):
             raise ValueError("replicator Euler step left the probability simplex")
         shares = [value / total for value in updated]
         trajectory.append(shares[:])

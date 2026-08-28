@@ -102,6 +102,16 @@ def _assert_finite_tree(test: unittest.TestCase, value: object) -> None:
         test.assertTrue(math.isfinite(value), value)
 
 
+def _load_template(method_id: str, template: str | None = None) -> object:
+    path = TEMPLATES / (template or f"{method_id}.py")
+    spec = importlib.util.spec_from_file_location(method_id.replace("-", "_"), path)
+    if spec is None or spec.loader is None:
+        raise AssertionError(f"unable to load template: {method_id}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
 class MethodLibraryTests(unittest.TestCase):
     def test_catalog_contains_the_approved_thirty_methods_three_per_family(self) -> None:
         catalog = load_catalog()
@@ -290,15 +300,100 @@ class MethodLibraryTests(unittest.TestCase):
         fixtures = {fixture["method_id"]: fixture for fixture in fixture_payload["fixtures"]}
         for item in load_catalog():
             with self.subTest(method=item["id"]):
-                path = TEMPLATES / item["template"]
-                spec = importlib.util.spec_from_file_location(item["id"].replace("-", "_"), path)
-                self.assertIsNotNone(spec)
-                self.assertIsNotNone(spec.loader)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
+                module = _load_template(item["id"], item["template"])
                 result = module.solve(fixtures[item["id"]]["data"], {"seed": 17})
                 self.assertEqual({"values", "metrics", "assumptions"}, set(result))
                 _assert_finite_tree(self, result)
+                json.dumps(result, ensure_ascii=False, allow_nan=False)
+
+    def test_pca_accepts_nonzero_covariance_when_all_ones_is_a_null_direction(self) -> None:
+        module = _load_template("pca-reduction")
+
+        result = module.solve(
+            {"matrix": [[-1, 1], [0, 0], [1, -1]], "iterations": 30},
+            {"seed": 0},
+        )
+
+        self.assertAlmostEqual(1.0, result["metrics"]["explained_variance_ratio"])
+        self.assertAlmostEqual(2 ** -0.5, result["metrics"]["loadings"][0])
+        self.assertAlmostEqual(-(2 ** -0.5), result["metrics"]["loadings"][1])
+        self.assertAlmostEqual(-(2 ** 0.5), result["values"][0])
+        self.assertAlmostEqual(2 ** 0.5, result["values"][2])
+
+    def test_every_direct_solve_rejects_nonfinite_input_even_when_unused(self) -> None:
+        fixture_payload = _strict_json(LIBRARY / "assets/fixtures/method-smoke.json")
+        fixtures = {fixture["method_id"]: fixture for fixture in fixture_payload["fixtures"]}
+        for item in load_catalog():
+            with self.subTest(method=item["id"]):
+                data = copy.deepcopy(fixtures[item["id"]]["data"])
+                data["nonfinite_probe"] = float("inf")
+                module = _load_template(item["id"], item["template"])
+                with self.assertRaisesRegex(ValueError, "finite JSON"):
+                    module.solve(data, {"seed": 17})
+
+    def test_direct_solve_rejects_a_nonfinite_derived_metric(self) -> None:
+        module = _load_template("exponential-smoothing")
+
+        with self.assertRaisesRegex(ValueError, "finite JSON"):
+            module.solve(
+                {"values": [1e308, -1e308], "alpha": 1.0, "horizon": 1},
+                {"seed": 0},
+            )
+
+    def test_nonlinear_optimizer_catalogs_the_controls_its_template_consumes(self) -> None:
+        item = next(
+            entry for entry in load_catalog()
+            if entry["id"] == "nonlinear-constrained-optimization"
+        )
+        inputs = {entry["name"]: entry for entry in item["inputs"]}
+        self.assertTrue({"step_size", "iterations"} <= set(inputs))
+        self.assertTrue(inputs["step_size"]["meaning"])
+        self.assertTrue(inputs["step_size"]["units"])
+        self.assertTrue(inputs["iterations"]["meaning"])
+        self.assertTrue(inputs["iterations"]["units"])
+
+        module = _load_template(item["id"], item["template"])
+        base = {
+            "linear": [4, 2],
+            "quadratic": [1, 0.5],
+            "bounds": [[0, 3], [0, 3]],
+            "sum_limit": 3,
+            "iterations": 1,
+        }
+        slow = module.solve({**base, "step_size": 0.01}, {"seed": 0})
+        fast = module.solve({**base, "step_size": 0.2}, {"seed": 0})
+        self.assertEqual(1, slow["metrics"]["iterations"])
+        self.assertEqual(1, fast["metrics"]["iterations"])
+        self.assertNotEqual(slow["values"], fast["values"])
+
+    def test_replicator_rejects_a_materially_negative_euler_update(self) -> None:
+        module = _load_template("evolutionary-replicator")
+
+        with self.assertRaisesRegex(ValueError, "probability simplex"):
+            module.solve(
+                {
+                    "payoff": [[-100, -100], [100, 100]],
+                    "initial": [0.5, 0.5],
+                    "dt": 0.1,
+                    "steps": 1,
+                },
+                {"seed": 0},
+            )
+
+    def test_random_forest_scale_metadata_matches_depth_one_split_scanning(self) -> None:
+        item = next(
+            entry for entry in load_catalog()
+            if entry["id"] == "random-forest-classification"
+        )
+        module = _load_template(item["id"], item["template"])
+        result = module.solve(
+            {"X": [[0], [1], [2], [3]], "y": [0, 0, 1, 1], "n_trees": 3},
+            {"seed": 7},
+        )
+
+        self.assertEqual(1, result["metrics"]["tree_depth"])
+        self.assertIn("O(T sqrt(p) n^2)", item["scale_limit"])
+        self.assertIn("n<=500", item["scale_limit"])
 
 
 if __name__ == "__main__":

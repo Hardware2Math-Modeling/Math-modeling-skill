@@ -14,6 +14,23 @@ def _two_by_two(a: float, b: float, c: float, d: float, first: float, second: fl
     return ((first * d - b * second) / determinant, (a * second - first * c) / determinant)
 
 
+def _finite_json_io(function: Any) -> Any:
+    def checked(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+        try:
+            json.dumps({"data": data, "config": config}, allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"solve input must be finite JSON: {error}") from error
+        result = function(data, config)
+        try:
+            json.dumps(result, allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"solve result must be finite JSON: {error}") from error
+        return result
+
+    return checked
+
+
+@_finite_json_io
 def solve(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     """Fit y = a*exp(b*x) with a deterministic Gauss-Newton iteration."""
     predictors = [float(value) for value in data["x"]]

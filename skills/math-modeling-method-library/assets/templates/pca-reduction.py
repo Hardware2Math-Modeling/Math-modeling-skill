@@ -7,6 +7,23 @@ from pathlib import Path
 from typing import Any
 
 
+def _finite_json_io(function: Any) -> Any:
+    def checked(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+        try:
+            json.dumps({"data": data, "config": config}, allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"solve input must be finite JSON: {error}") from error
+        result = function(data, config)
+        try:
+            json.dumps(result, allow_nan=False)
+        except (TypeError, ValueError, OverflowError) as error:
+            raise ValueError(f"solve result must be finite JSON: {error}") from error
+        return result
+
+    return checked
+
+
+@_finite_json_io
 def solve(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     """Extract the first principal component by covariance power iteration."""
     matrix = [[float(value) for value in row] for row in data["matrix"]]
@@ -22,7 +39,12 @@ def solve(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     total_variance = sum(covariance[index][index] for index in range(columns))
     if total_variance <= 1e-15:
         raise ValueError("PCA is undefined for zero total variance")
-    vector = [1.0 / math.sqrt(columns)] * columns
+    seed_row = max(
+        covariance,
+        key=lambda row: sum(value * value for value in row),
+    )
+    seed_norm = math.sqrt(sum(value * value for value in seed_row))
+    vector = [value / seed_norm for value in seed_row]
     for _ in range(iterations):
         updated = [sum(value * component for value, component in zip(row, vector)) for row in covariance]
         norm = math.sqrt(sum(value * value for value in updated))
