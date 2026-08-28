@@ -320,7 +320,38 @@ class MethodLibraryTests(unittest.TestCase):
         self.assertAlmostEqual(-(2 ** 0.5), result["values"][0])
         self.assertAlmostEqual(2 ** 0.5, result["values"][2])
 
-    def test_pca_initialization_reaches_the_largest_eigenvalue_not_a_subleading_row_space(self) -> None:
+    def test_pca_default_accepts_an_ordinary_rotated_spectrum(self) -> None:
+        module = _load_template("pca-reduction")
+        root_two = 2 ** 0.5
+        directions = (
+            [1 / root_two, 1 / root_two, 0.0],
+            [-1 / root_two, 1 / root_two, 0.0],
+            [0.0, 0.0, 1.0],
+        )
+        rows = []
+        for eigenvalue, direction in zip((1.0, 0.9, 0.1), directions):
+            amplitude = (5 * eigenvalue / 2) ** 0.5
+            positive = [amplitude * value for value in direction]
+            rows.extend((positive, [-value for value in positive]))
+
+        result = module.solve({"matrix": rows}, {"seed": 0})
+
+        self.assertAlmostEqual(1.0, result["metrics"]["explained_variance"])
+        self.assertAlmostEqual(0.5, result["metrics"]["explained_variance_ratio"])
+        self.assertAlmostEqual(1 / root_two, result["metrics"]["loadings"][0])
+        self.assertAlmostEqual(1 / root_two, result["metrics"]["loadings"][1])
+        self.assertAlmostEqual(0.0, result["metrics"]["loadings"][2])
+        self.assertLessEqual(
+            result["metrics"]["off_diagonal_norm"],
+            result["metrics"]["convergence_tolerance"],
+        )
+        self.assertLessEqual(
+            result["metrics"]["convergence_residual"],
+            result["metrics"]["convergence_tolerance"],
+        )
+        self.assertLessEqual(result["metrics"]["jacobi_sweeps"], 20)
+
+    def test_pca_jacobi_diagonalization_selects_the_largest_eigenvalue(self) -> None:
         module = _load_template("pca-reduction")
         item = next(entry for entry in load_catalog() if entry["id"] == "pca-reduction")
         root_two = 2 ** 0.5
@@ -337,33 +368,25 @@ class MethodLibraryTests(unittest.TestCase):
                 ]
             )
 
-        result = module.solve({"matrix": rows, "iterations": 100}, {"seed": 0})
+        result = module.solve({"matrix": rows}, {"seed": 0})
 
         self.assertAlmostEqual(1.0, result["metrics"]["explained_variance"])
         self.assertAlmostEqual(0.5, result["metrics"]["explained_variance_ratio"])
         self.assertAlmostEqual(1 / root_two, result["metrics"]["loadings"][0])
         self.assertAlmostEqual(1 / root_two, result["metrics"]["loadings"][2])
-        self.assertIn("多起点", item["formula"])
-        self.assertIn("O(np^2+iter*p^3)", item["scale_limit"])
+        self.assertIn("Jacobi", item["formula"])
+        self.assertIn("O(np^2+sweeps*p^3)", item["scale_limit"])
         self.assertIn("p<=50", item["scale_limit"])
 
-    def test_pca_rejects_an_iteration_budget_that_cannot_certify_the_leading_direction(self) -> None:
+    def test_pca_rejects_a_sweep_budget_that_cannot_diagonalize_the_covariance(self) -> None:
         module = _load_template("pca-reduction")
-        columns = 200
-        uniform = [1 / columns ** 0.5] * columns
-        contrast = [0.0] * columns
-        contrast[0], contrast[1] = 2 ** -0.5, -(2 ** -0.5)
-        components = [
-            (0.4, [1.0 if row == column else 0.0 for row in range(columns)])
-            for column in range(columns)
+        matrix = [
+            [1.0, 2.0, 3.0],
+            [4.0, 0.0, 1.0],
+            [2.0, -1.0, 5.0],
+            [-2.0, 3.0, 0.0],
+            [0.0, -4.0, -2.0],
         ]
-        components.extend(((0.6, uniform), (0.1, contrast)))
-        sample_count = 2 * len(components)
-        matrix = []
-        for variance, direction in components:
-            amplitude = ((sample_count - 1) * variance / 2) ** 0.5
-            positive = [amplitude * value for value in direction]
-            matrix.extend((positive, [-value for value in positive]))
 
         with self.assertRaisesRegex(ValueError, "did not converge"):
             module.solve({"matrix": matrix, "iterations": 1}, {"seed": 0})
@@ -395,16 +418,183 @@ class MethodLibraryTests(unittest.TestCase):
             result["metrics"]["convergence_residual"],
             result["metrics"]["convergence_tolerance"],
         )
+        self.assertEqual(0, result["metrics"]["jacobi_sweeps"])
+        self.assertEqual(0.0, result["metrics"]["off_diagonal_norm"])
+
+    def test_pca_handles_repeated_leading_eigenvalues_deterministically(self) -> None:
+        module = _load_template("pca-reduction")
+        root_two = 2 ** 0.5
+        root_three = 3 ** 0.5
+        root_six = 6 ** 0.5
+        directions = (
+            [1 / root_three, 1 / root_three, 1 / root_three],
+            [1 / root_two, -1 / root_two, 0.0],
+            [1 / root_six, 1 / root_six, -2 / root_six],
+        )
+        rows = []
+        for eigenvalue, direction in zip((1.0, 1.0, 0.1), directions):
+            amplitude = (5 * eigenvalue / 2) ** 0.5
+            positive = [amplitude * value for value in direction]
+            rows.extend((positive, [-value for value in positive]))
+
+        first = module.solve({"matrix": rows}, {"seed": 0})
+        second = module.solve({"matrix": rows}, {"seed": 999})
+
+        self.assertEqual(first, second)
+        self.assertAlmostEqual(1.0, first["metrics"]["explained_variance"])
+        loadings = first["metrics"]["loadings"]
+        self.assertAlmostEqual(1.0, math.hypot(*loadings))
+        self.assertAlmostEqual(0.0, sum(a * b for a, b in zip(loadings, directions[2])))
+        anchor = max(range(3), key=lambda index: abs(loadings[index]))
+        self.assertGreaterEqual(loadings[anchor], 0.0)
+
+    def test_pca_resolves_a_near_repeated_leading_eigenvalue(self) -> None:
+        module = _load_template("pca-reduction")
+        root_two = 2 ** 0.5
+        root_three = 3 ** 0.5
+        root_six = 6 ** 0.5
+        leading = [1 / root_three, 1 / root_three, 1 / root_three]
+        directions = (
+            leading,
+            [1 / root_two, -1 / root_two, 0.0],
+            [1 / root_six, 1 / root_six, -2 / root_six],
+        )
+        rows = []
+        for eigenvalue, direction in zip((1.0, 1.0 - 1e-10, 0.1), directions):
+            amplitude = (5 * eigenvalue / 2) ** 0.5
+            positive = [amplitude * value for value in direction]
+            rows.extend((positive, [-value for value in positive]))
+
+        result = module.solve({"matrix": rows}, {"seed": 0})
+
+        self.assertTrue(
+            math.isclose(
+                result["metrics"]["explained_variance"],
+                1.0,
+                rel_tol=1e-12,
+                abs_tol=0.0,
+            )
+        )
+        alignment = abs(sum(a * b for a, b in zip(result["metrics"]["loadings"], leading)))
+        self.assertGreater(alignment, 0.999)
+
+    def test_pca_handles_one_feature_without_a_jacobi_rotation(self) -> None:
+        module = _load_template("pca-reduction")
+
+        result = module.solve({"matrix": [[-1.0], [1.0]]}, {"seed": 0})
+
+        self.assertEqual([1.0], result["metrics"]["loadings"])
+        self.assertAlmostEqual(2.0, result["metrics"]["explained_variance"])
+        self.assertEqual(0, result["metrics"]["jacobi_sweeps"])
+        self.assertEqual(0.0, result["metrics"]["off_diagonal_norm"])
+
+    def test_pca_rejects_finite_input_when_covariance_overflows(self) -> None:
+        module = _load_template("pca-reduction")
+
+        for matrix in (
+            [[-1e308], [1e308]],
+            [[-1.35e154], [1.35e154], [0.0]],
+        ):
+            with self.subTest(matrix=matrix), self.assertRaisesRegex(
+                ValueError,
+                "finite covariance",
+            ):
+                module.solve({"matrix": matrix}, {"seed": 0})
+
+    def test_pca_keeps_a_large_but_finite_rotated_covariance_finite(self) -> None:
+        module = _load_template("pca-reduction")
+        root_two = 2 ** 0.5
+        directions = ([1 / root_two, 1 / root_two], [-1 / root_two, 1 / root_two])
+        rows = []
+        for eigenvalue, direction in zip((6e307, 3e307), directions):
+            amplitude = (eigenvalue * 2.5) ** 0.5
+            positive = [amplitude * value for value in direction]
+            rows.extend((positive, [-value for value in positive]))
+        rows.extend(([0.0, 0.0], [0.0, 0.0]))
+
+        result = module.solve({"matrix": rows}, {"seed": 0})
+
+        self.assertTrue(math.isfinite(result["metrics"]["explained_variance"]))
+        self.assertTrue(
+            math.isclose(
+                result["metrics"]["explained_variance"],
+                6e307,
+                rel_tol=1e-12,
+                abs_tol=0.0,
+            )
+        )
+        _assert_finite_tree(self, result)
+
+    def test_pca_rejects_more_than_fifty_features_before_jacobi_work(self) -> None:
+        module = _load_template("pca-reduction")
+
+        with self.assertRaisesRegex(ValueError, "1..50 columns"):
+            module.solve({"matrix": [[-1.0] * 51, [1.0] * 51]}, {"seed": 0})
+
+    def test_pca_rejects_a_fractional_jacobi_sweep_budget(self) -> None:
+        module = _load_template("pca-reduction")
+
+        with self.assertRaisesRegex(ValueError, "integer Jacobi sweep"):
+            module.solve(
+                {"matrix": [[-1.0], [1.0]], "iterations": 1.5},
+                {"seed": 0},
+            )
+
+    def test_pca_certifies_the_returned_vector_against_the_original_covariance(self) -> None:
+        module = _load_template("pca-reduction")
+        matrix = [
+            [1.0, 2.0, 3.0],
+            [4.0, 0.0, 1.0],
+            [2.0, -1.0, 5.0],
+            [-2.0, 3.0, 0.0],
+            [0.0, -4.0, -2.0],
+        ]
+
+        result = module.solve({"matrix": matrix}, {"seed": 0})
+
+        means = [sum(row[column] for row in matrix) / len(matrix) for column in range(3)]
+        centered = [[value - mean for value, mean in zip(row, means)] for row in matrix]
+        covariance = [
+            [
+                sum(sample[row] * sample[column] for sample in centered)
+                / (len(centered) - 1)
+                for column in range(3)
+            ]
+            for row in range(3)
+        ]
+        vector = result["metrics"]["loadings"]
+        eigenvalue = result["metrics"]["explained_variance"]
+        product = [sum(value * loading for value, loading in zip(row, vector)) for row in covariance]
+        residual = math.hypot(
+            *(value - eigenvalue * loading for value, loading in zip(product, vector))
+        )
+        self.assertLessEqual(residual, result["metrics"]["convergence_tolerance"])
+        self.assertTrue(
+            math.isclose(
+                residual,
+                result["metrics"]["convergence_residual"],
+                rel_tol=1e-12,
+                abs_tol=1e-15,
+            )
+        )
 
     def test_pca_catalog_documents_the_convergence_budget_and_fail_closed_behavior(self) -> None:
         item = next(entry for entry in load_catalog() if entry["id"] == "pca-reduction")
         iterations = next(value for value in item["inputs"] if value["name"] == "iterations")
 
+        self.assertIn("Jacobi", iterations["meaning"])
+        self.assertIn("扫描", iterations["meaning"])
+        self.assertIn("整数", iterations["meaning"])
         self.assertIn("最大", iterations["meaning"])
-        self.assertIn("默认 100", iterations["meaning"])
-        self.assertIn("1 至 10000", iterations["meaning"])
-        self.assertTrue(any("未收敛" in signal for signal in item["failure_signals"]))
-        self.assertTrue(any("残差" in check for check in item["validation"]))
+        self.assertIn("默认 20", iterations["meaning"])
+        self.assertIn("1 至 50", iterations["meaning"])
+        self.assertIn("输入硬上限 p<=50", item["scale_limit"])
+        self.assertTrue(
+            any("Jacobi" in signal and "未收敛" in signal for signal in item["failure_signals"])
+        )
+        self.assertTrue(
+            any("非对角" in check and "残差" in check for check in item["validation"])
+        )
 
     def test_every_direct_solve_rejects_nonfinite_input_even_when_unused(self) -> None:
         fixture_payload = _strict_json(LIBRARY / "assets/fixtures/method-smoke.json")
