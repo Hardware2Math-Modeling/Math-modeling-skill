@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import platform
@@ -15,6 +16,7 @@ from pathlib import Path
 from typing import Sequence
 
 from suite_validation import ensure_no_symlink_components, ensure_outside_plugin_root
+from manifest import sha256_file
 
 
 _PYTHON_PROBE = "import sys; print(sys.executable); print(sys.version)"
@@ -23,6 +25,10 @@ _PACKAGE_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9._-]*[A-Za-z0-9])?$")
 _PACKAGE_NOT_FOUND_EXIT_CODE = 44
 _PACKAGE_NOT_FOUND_SENTINEL = "__MATH_MODELING_PACKAGE_NOT_FOUND__"
 _PROBE_TIMEOUT_SECONDS = 15
+_POPPLER_VERSION_RE = re.compile(
+    r"^pdftoppm version [0-9]+(?:\.[0-9]+){1,3}(?:[-+._A-Za-z0-9]*)?$"
+)
+_RENDERER_TRUST_BASIS = "user_supplied_preflight_binary"
 
 
 def _absolute_path(path: Path, label: str) -> Path:
@@ -186,6 +192,71 @@ def _tool_version(path: Path) -> tuple[str | None, str | None]:
     return first_line, None
 
 
+def _probe_output(completed: subprocess.CompletedProcess[str]) -> str:
+    return completed.stdout + completed.stderr
+
+
+def _poppler_signature(output: str) -> str | None:
+    lines = output.splitlines()
+    if not lines or _POPPLER_VERSION_RE.fullmatch(lines[0]) is None:
+        return None
+    return lines[0]
+
+
+def _pdf_renderer_report(path: Path | None) -> dict[str, object]:
+    empty = {
+        "name": "pdftoppm",
+        "status": "not_supplied",
+        "path": None,
+        "sha256": None,
+        "version_command": None,
+        "version_exit_code": None,
+        "version_signature": None,
+        "version_output": None,
+        "version_output_sha256": None,
+        "trust_basis": _RENDERER_TRUST_BASIS,
+    }
+    if path is None:
+        return empty
+    executable = _regular_file(Path(path), "pdftoppm executable")
+    if executable.name != "pdftoppm" or not os.access(executable, os.X_OK):
+        raise ValueError("pdftoppm executable must be an executable file named pdftoppm")
+    command = [str(executable), "-v"]
+    try:
+        completed = _run_probe(command)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return {
+            **empty,
+            "status": "error",
+            "path": str(executable),
+            "sha256": sha256_file(executable),
+            "version_command": command,
+            "error": str(error),
+        }
+    output = _probe_output(completed)
+    signature = _poppler_signature(output)
+    status = "available" if completed.returncode == 0 and signature is not None else "error"
+    report = {
+        **empty,
+        "status": status,
+        "path": str(executable),
+        "sha256": sha256_file(executable),
+        "version_command": command,
+        "version_exit_code": completed.returncode,
+        "version_signature": signature,
+        "version_output": output or None,
+        "version_output_sha256": (
+            hashlib.sha256(output.encode("utf-8")).hexdigest() if output else None
+        ),
+    }
+    if status != "available":
+        report["error"] = (
+            "pdftoppm version probe must exit zero with canonical "
+            "'pdftoppm version X.Y' output"
+        )
+    return report
+
+
 def _latex_report(paper_production: bool) -> dict[str, object]:
     tools: list[dict[str, object]] = []
     selected: str | None = None
@@ -273,6 +344,7 @@ def diagnose_environment(
     required_packages: Sequence[str],
     template_path: Path | None,
     paper_production: bool = False,
+    pdftoppm_executable: Path | None = None,
 ) -> dict[str, object]:
     """Inspect exactly one supplied Python environment and return diagnostics."""
 
@@ -291,6 +363,7 @@ def diagnose_environment(
     python_report = _python_report(python)
     packages = _package_reports(python, required_packages) if python_report["status"] == "pass" else []
     latex = _latex_report(paper_production)
+    pdf_renderer = _pdf_renderer_report(pdftoppm_executable)
     template = _template_report(template_path)
 
     blockers: list[str] = []
@@ -308,6 +381,8 @@ def diagnose_environment(
         warnings.append(str(latex["message"]))
     if template["status"] == "fallback_non_submission":
         warnings.append(str(template["message"]))
+    if pdf_renderer["status"] == "error":
+        blockers.append("the supplied pdftoppm renderer failed its canonical version probe")
 
     status = "blocking" if blockers else "warning" if warnings else "pass"
     return {
@@ -316,6 +391,7 @@ def diagnose_environment(
         "python": python_report,
         "packages": packages,
         "latex": latex,
+        "pdf_renderer": pdf_renderer,
         "template": template,
         "blockers": blockers,
         "warnings": warnings,

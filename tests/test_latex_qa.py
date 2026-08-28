@@ -88,6 +88,12 @@ def write_xref_stream_pdf(
         root_value = b"<< /Type /Font /Subject (/Type /Catalog) >>"
     elif root_variant == "comment":
         root_value = b"<< /Type /Font % /Type /Catalog\n >>"
+    elif root_variant == "unclosed":
+        root_value = b"<< /Type /Catalog /Pages 2 0 R "
+    elif root_variant == "trailing":
+        root_value = b"<< /Type /Catalog /Pages 2 0 R >> /Unexpected"
+    elif root_variant == "duplicate_type":
+        root_value = b"<< /Type /Catalog /Type /Font /Pages 2 0 R >>"
     values = [
         root_value,
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
@@ -379,6 +385,36 @@ class LatexQATests(unittest.TestCase):
                     report = inspect_pdf(pdf, aux_path=aux, log_paths=[])
                 self.assertEqual("fail", report["status"])
                 self.assertIn("catalog", " ".join(report["failed_checks"]).lower())
+
+    def test_catalog_root_requires_closed_dictionary_at_exact_object_boundary(self) -> None:
+        aux = self.root / "catalog-boundary.aux"
+        aux.write_text(
+            "\\newlabel{mm-body-start}{{1}{1}}\n"
+            "\\newlabel{mm-body-end}{{8}{1}}\n",
+            encoding="utf-8",
+        )
+        for variant in ("unclosed", "trailing"):
+            pdf = self.root / f"catalog-{variant}.pdf"
+            write_xref_stream_pdf(pdf, root_variant=variant)
+            with self.subTest(variant=variant):
+                with patch("latex_qa.shutil.which", return_value=None):
+                    report = inspect_pdf(pdf, aux_path=aux, log_paths=[])
+                self.assertEqual("fail", report["status"])
+                self.assertIn("catalog", " ".join(report["failed_checks"]).lower())
+
+    def test_catalog_root_rejects_duplicate_top_level_dictionary_keys(self) -> None:
+        pdf = self.root / "catalog-duplicate-type.pdf"
+        aux = self.root / "catalog-duplicate-type.aux"
+        write_xref_stream_pdf(pdf, root_variant="duplicate_type")
+        aux.write_text(
+            "\\newlabel{mm-body-start}{{1}{1}}\n"
+            "\\newlabel{mm-body-end}{{8}{1}}\n",
+            encoding="utf-8",
+        )
+        with patch("latex_qa.shutil.which", return_value=None):
+            report = inspect_pdf(pdf, aux_path=aux, log_paths=[])
+        self.assertEqual("fail", report["status"])
+        self.assertIn("catalog", " ".join(report["failed_checks"]).lower())
 
     def test_compressed_root_wrong_objstm_member_fails_closed(self) -> None:
         pdf = self.root / "compressed-root-wrong-member.pdf"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import subprocess
 import sys
 import tempfile
@@ -89,6 +90,45 @@ class PreflightTests(unittest.TestCase):
         )
         self.assertIn(str(sys.version_info.major), python["version"])
         self.assertTrue(python["platform"])
+
+    def test_records_explicit_pdftoppm_hash_and_canonical_poppler_probe(self) -> None:
+        renderer = self.project / "pdftoppm"
+        renderer.write_text(
+            "#!/usr/bin/env python3\n"
+            "import sys\n"
+            "if sys.argv[1:] == ['-v']:\n"
+            "    print('pdftoppm version 99.0.0', file=sys.stderr)\n"
+            "    print('fixture copyright', file=sys.stderr)\n"
+            "    raise SystemExit(0)\n"
+            "raise SystemExit(9)\n",
+            encoding="utf-8",
+        )
+        renderer.chmod(0o755)
+        with patch("preflight.shutil.which", return_value=None):
+            report = diagnose_environment(
+                project_root=self.project,
+                python_executable=self.python,
+                required_packages=[],
+                template_path=None,
+                pdftoppm_executable=renderer,
+            )
+
+        evidence = report["pdf_renderer"]
+        output = "pdftoppm version 99.0.0\nfixture copyright\n"
+        self.assertEqual("available", evidence["status"])
+        self.assertEqual(str(renderer), evidence["path"])
+        self.assertEqual(
+            hashlib.sha256(renderer.read_bytes()).hexdigest(), evidence["sha256"]
+        )
+        self.assertEqual([str(renderer), "-v"], evidence["version_command"])
+        self.assertEqual(0, evidence["version_exit_code"])
+        self.assertEqual("pdftoppm version 99.0.0", evidence["version_signature"])
+        self.assertEqual(output, evidence["version_output"])
+        self.assertEqual(
+            hashlib.sha256(output.encode("utf-8")).hexdigest(),
+            evidence["version_output_sha256"],
+        )
+        self.assertEqual("user_supplied_preflight_binary", evidence["trust_basis"])
 
     def test_checks_latex_tools_in_priority_order_and_scopes_missing_tool(self) -> None:
         observed_tools: list[str] = []

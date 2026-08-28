@@ -171,8 +171,9 @@ def _skip_pdf_ws(data: bytes, cursor: int) -> int:
         if data[cursor] in b" \t\r\n\f\x00":
             cursor += 1
         elif data[cursor] == ord("%"):
-            newline = data.find(b"\n", cursor + 1)
-            cursor = len(data) if newline < 0 else newline + 1
+            cursor += 1
+            while cursor < len(data) and data[cursor] not in b"\r\n":
+                cursor += 1
         else:
             break
     return cursor
@@ -193,17 +194,30 @@ def _pdf_token(data: bytes, cursor: int) -> tuple[str, bytes | None, int]:
         depth = 1
         while cursor < len(data) and depth:
             if data[cursor] == ord("\\"):
-                cursor += 2
+                cursor += 1
+                if cursor >= len(data):
+                    return "invalid", None, cursor
+                if data[cursor] == ord("\r"):
+                    cursor += 1
+                    if cursor < len(data) and data[cursor] == ord("\n"):
+                        cursor += 1
+                else:
+                    cursor += 1
                 continue
             if data[cursor] == ord("("):
                 depth += 1
             elif data[cursor] == ord(")"):
                 depth -= 1
             cursor += 1
-        return "literal", None, cursor
+        return ("literal", None, cursor) if depth == 0 else ("invalid", None, cursor)
     if data[cursor] == ord("<"):
         end = data.find(b">", cursor + 1)
-        return "hex", None, len(data) if end < 0 else end + 1
+        if end < 0 or any(
+            byte not in b"0123456789abcdefABCDEF \t\r\n\f\x00"
+            for byte in data[cursor + 1 : end]
+        ):
+            return "invalid", None, len(data) if end < 0 else end + 1
+        return "hex", None, end + 1
     if data[cursor] == ord("/"):
         end = cursor + 1
         while end < len(data) and data[end] not in b" \t\r\n\f\x00[]()<>{}/%":
@@ -212,44 +226,106 @@ def _pdf_token(data: bytes, cursor: int) -> tuple[str, bytes | None, int]:
     end = cursor
     while end < len(data) and data[end] not in b" \t\r\n\f\x00[]()<>{}/%":
         end += 1
+    if end == cursor:
+        return "invalid", None, cursor + 1
     return "atom", data[cursor:end], end
 
 
-def _skip_pdf_value(data: bytes, cursor: int, token: tuple[str, bytes | None, int]) -> int:
-    kind, _, cursor = token
+def _pdf_name(value: bytes | None) -> bytes | None:
+    if value is None:
+        return None
+    decoded = bytearray()
+    cursor = 0
+    while cursor < len(value):
+        if value[cursor] != ord("#"):
+            decoded.append(value[cursor])
+            cursor += 1
+            continue
+        if cursor + 2 >= len(value):
+            return None
+        escaped = value[cursor + 1 : cursor + 3]
+        if any(byte not in b"0123456789abcdefABCDEF" for byte in escaped):
+            return None
+        decoded.append(int(escaped, 16))
+        cursor += 3
+    return bytes(decoded)
+
+
+def _parse_pdf_value(
+    data: bytes,
+    token: tuple[str, bytes | None, int],
+) -> tuple[int, bool]:
+    kind, value, cursor = token
     if kind == "dict_start":
-        while True:
-            key = _pdf_token(data, cursor)
-            if key[0] in ("dict_end", "eof"):
-                return key[2]
-            cursor = key[2]
-            cursor = _skip_pdf_value(data, cursor, _pdf_token(data, cursor))
+        end, valid, _ = _parse_pdf_dictionary(data, cursor)
+        return end, valid
     if kind == "[":
         while True:
-            value = _pdf_token(data, cursor)
-            if value[0] in ("]", "eof"):
-                return value[2]
-            cursor = _skip_pdf_value(data, cursor, value)
-    return cursor
+            member = _pdf_token(data, cursor)
+            if member[0] == "]":
+                return member[2], True
+            if member[0] in ("eof", "invalid", "dict_end"):
+                return member[2], False
+            cursor, valid = _parse_pdf_value(data, member)
+            if not valid:
+                return cursor, False
+    if kind in ("name", "literal", "hex"):
+        return cursor, kind != "name" or _pdf_name(value) is not None
+    if kind == "atom" and value:
+        if value.isdigit():
+            generation = _pdf_token(data, cursor)
+            reference = _pdf_token(data, generation[2])
+            if (
+                generation[0] == "atom"
+                and generation[1]
+                and generation[1].isdigit()
+                and reference[0] == "atom"
+                and reference[1] == b"R"
+            ):
+                return reference[2], True
+        return cursor, True
+    return cursor, False
+
+
+def _parse_pdf_dictionary(
+    data: bytes,
+    cursor: int,
+) -> tuple[int, bool, dict[bytes, tuple[str, bytes | None]]]:
+    entries: dict[bytes, tuple[str, bytes | None]] = {}
+    while True:
+        key = _pdf_token(data, cursor)
+        if key[0] == "dict_end":
+            return key[2], True, entries
+        if key[0] != "name":
+            return key[2], False, entries
+        decoded_key = _pdf_name(key[1])
+        if decoded_key is None or decoded_key in entries:
+            return key[2], False, entries
+        value = _pdf_token(data, key[2])
+        if value[0] in ("eof", "invalid", "dict_end", "]"):
+            return value[2], False, entries
+        end, valid = _parse_pdf_value(data, value)
+        if not valid:
+            return end, False, entries
+        normalized_value = (
+            _pdf_name(value[1]) if value[0] == "name" else value[1]
+        )
+        if value[0] == "name" and normalized_value is None:
+            return end, False, entries
+        entries[decoded_key] = (value[0], normalized_value)
+        cursor = end
 
 
 def _is_catalog_dictionary(data: bytes) -> bool:
     first = _pdf_token(data, 0)
     if first[0] != "dict_start":
         return False
-    cursor = first[2]
-    while True:
-        key = _pdf_token(data, cursor)
-        if key[0] in ("dict_end", "eof"):
-            return False
-        cursor = key[2]
-        value = _pdf_token(data, cursor)
-        if value[0] in ("dict_end", "eof"):
-            return False
-        if key[0] == "name" and key[1] == b"Type":
-            if value[0] == "name" and value[1] == b"Catalog":
-                return True
-        cursor = _skip_pdf_value(data, cursor, value)
+    cursor, valid, entries = _parse_pdf_dictionary(data, first[2])
+    return (
+        valid
+        and _skip_pdf_ws(data, cursor) == len(data)
+        and entries.get(b"Type") == ("name", b"Catalog")
+    )
 
 
 def _pdf_objects(data: bytes) -> tuple[dict[int, tuple[int, bytes]], list[str]]:
