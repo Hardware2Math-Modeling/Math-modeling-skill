@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
+from authorization_capability import _install_host_capability  # noqa: E402
 from project_state import (  # noqa: E402
     create_iteration,
     init_project,
@@ -75,6 +76,14 @@ class FixtureUserEventVerifier:
         ):
             return None
         return json.loads(json.dumps(self.receipt))
+
+
+def host_capability(receipt: dict[str, object]) -> object:
+    verifier = FixtureUserEventVerifier(receipt)
+    return _install_host_capability(
+        verify_user_event=verifier.verify_user_event,
+        verify_official_source=lambda **_: False,
+    )
 
 
 class ProjectStateTests(unittest.TestCase):
@@ -238,9 +247,7 @@ class ProjectStateTests(unittest.TestCase):
             artifact_scope=gate_scope(digest),
             note="accepted after review",
             confirmation_event_id="fixture-gate1-confirmation",
-            trusted_user_event_verifier=FixtureUserEventVerifier(
-                user_confirmation(digest)
-            ),
+            host_capability=host_capability(user_confirmation(digest)),
         )
         self.assertEqual("confirmed", load_current(self.project)["gates"]["gate1"])
         self.assertEqual(1, len(report["records"]))
@@ -266,6 +273,22 @@ class ProjectStateTests(unittest.TestCase):
         self.assertFalse((self.project / "qa/gates.json").exists())
         self.assertEqual("pending", load_current(self.project)["gates"]["gate1"])
 
+    def test_record_gate_rejects_caller_created_echo_verifier(self) -> None:
+        """Catches gate mutation trusting a caller-owned verifier method."""
+
+        with self.assertRaisesRegex(ValueError, "capability"):
+            record_gate(
+                self.project,
+                gate_id="gate1",
+                status="confirmed",
+                confirmer="reviewer",
+                artifact_hashes=["a" * 64],
+                artifact_scope=gate_scope(),
+                note="caller echo must not authorize",
+                confirmation_event_id="fixture-gate1-confirmation",
+                host_capability=FixtureUserEventVerifier(user_confirmation()),
+            )
+
     def test_record_gate_rejects_self_authored_receipt_and_unbound_event(self) -> None:
         """Catches JSON self-attestation or a trusted event for different evidence."""
 
@@ -289,9 +312,7 @@ class ProjectStateTests(unittest.TestCase):
                 artifact_scope=gate_scope(),
                 note="event is bound to different evidence",
                 confirmation_event_id="fixture-gate1-confirmation",
-                trusted_user_event_verifier=FixtureUserEventVerifier(
-                    user_confirmation("b" * 64)
-                ),
+                host_capability=host_capability(user_confirmation("b" * 64)),
             )
         self.assertFalse((self.project / "qa/gates.json").exists())
 
@@ -610,7 +631,7 @@ class ProjectStateTests(unittest.TestCase):
             check=False,
         )
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("host verifier", result.stderr)
+        self.assertIn("host capability", result.stderr)
 
     def test_cli_rejects_self_authored_user_confirmation_file(self) -> None:
         receipt = self.temp_path / "user-confirmation.json"

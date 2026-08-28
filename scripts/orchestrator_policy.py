@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import re
+import stat
 import sys
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -12,18 +13,23 @@ _SCRIPT_DIRECTORY = str(Path(__file__).resolve().parent)
 if _SCRIPT_DIRECTORY not in sys.path:
     sys.path.insert(0, _SCRIPT_DIRECTORY)
 
+from authorization_capability import (
+    verify_official_source as verify_host_official_source,
+    verify_user_event as verify_host_user_event,
+)
 from handoff_schema import (
     GATE_SCOPE_KINDS,
+    load_json_strict,
     strict_json_tree_errors,
     user_event_challenge_sha256,
     validate_document,
 )
 from latex_qa import evaluate_page_gate
+from manifest import safe_relative_path, sha256_file
 from paper_content import validate_paper_content
-from paper_production import (
-    paper_finalization_sha256,
-    validate_paper_finalization_record,
-)
+from paper_production import validate_paper_finalization_authority
+from project_state import load_current
+from suite_validation import ensure_no_symlink_components
 
 
 SUPPORTED_ACTIONS = (
@@ -53,6 +59,23 @@ _VALIDATION_ACTIONS = {
 _CONTENT_ACTIONS = {"paper-production", "page-gate-acceptance"}
 _TEMPLATE_ACTIONS = {"paper-production", "page-gate-acceptance"}
 _LATEX_ACTIONS = {"paper-production", "page-gate-acceptance"}
+_FORWARD_PROJECT_ACTIONS = {
+    "model-construction",
+    "model-solving",
+    "paper-writing",
+    "paper-production",
+    "page-gate-acceptance",
+    "submission-readiness",
+    "project-complete",
+}
+_NO_PAPER_MODEL_KINDS = frozenset(
+    {
+        "model-specification",
+        "result-contract",
+        "run-manifest",
+        "validation-manifest",
+    }
+)
 _ALLOWED_EVIDENCE = {
     "handoff",
     "iteration",
@@ -174,11 +197,53 @@ def _canonical_artifact_scope(value: object) -> list[dict[str, object]] | None:
     return sorted(entries, key=lambda item: (str(item["kind"]), str(item["path"])))
 
 
+def _project_artifact_errors(
+    project_root: object,
+    binding: object,
+    label: str,
+) -> list[str]:
+    """Verify one canonical project-relative regular file against its byte hash."""
+
+    try:
+        root_input = Path(project_root)  # type: ignore[arg-type]
+    except TypeError:
+        return [f"{label}: project_root must be an absolute existing directory"]
+    if not root_input.is_absolute() or ".." in root_input.parts:
+        return [f"{label}: project_root must be an absolute normalized directory"]
+    try:
+        root = ensure_no_symlink_components(root_input, "project_root")
+        root_mode = root.lstat().st_mode
+    except (OSError, ValueError) as error:
+        return [f"{label}: invalid project_root: {error}"]
+    if not stat.S_ISDIR(root_mode):
+        return [f"{label}: project_root must be an existing directory"]
+    if type(binding) is not dict:
+        return [f"{label}: artifact binding must be an object"]
+    path = binding.get("path")
+    digest = binding.get("sha256")
+    try:
+        relative = safe_relative_path(path, f"{label} path")  # type: ignore[arg-type]
+        target = ensure_no_symlink_components(root / relative, f"{label} file")
+    except ValueError as error:
+        return [f"{label}: {error}"]
+    if not target.is_relative_to(root):
+        return [f"{label}: artifact path must remain within project_root"]
+    try:
+        actual_hash = sha256_file(target)
+    except ValueError as error:
+        return [f"{label}: {error}"]
+    if type(digest) is not str or _HASH_RE.fullmatch(digest) is None:
+        return [f"{label}: artifact SHA-256 is invalid"]
+    if actual_hash != digest:
+        return [f"{label}: project file SHA-256 does not match the recorded hash"]
+    return []
+
+
 def _official_verification_errors(
     action: str,
     evidence: dict[str, object],
     expected_source_type: str,
-    official_source_verifier: object | None,
+    host_capability: object | None,
 ) -> list[str]:
     errors: list[str] = []
     verification = evidence.get("official_verification")
@@ -204,17 +269,14 @@ def _official_verification_errors(
         ):
             errors.append("shape-only .invalid URLs are non-authorizing")
 
-    if official_source_verifier is None:
-        errors.append("trusted official source verifier is required")
-        return errors
-    verify = getattr(official_source_verifier, "verify_official_source", None)
-    if not callable(verify):
-        errors.append("trusted official source verifier interface is invalid")
+    if host_capability is None:
+        errors.append("trusted process-local host capability is required")
         return errors
     if verification_errors:
         return errors
     try:
-        verified = verify(
+        verified = verify_host_official_source(
+            host_capability,
             competition=verification.get("competition"),
             source_type=verification.get("source_type"),
             source_url=verification.get("source_url"),
@@ -233,6 +295,7 @@ def _question_version_errors(
     evidence: dict[str, object],
     handoff: dict[str, object] | None,
     iteration: dict[str, object] | None,
+    project_root: object,
 ) -> list[str]:
     errors: list[str] = []
     record = _validated_document(
@@ -274,6 +337,13 @@ def _question_version_errors(
         binding = question.get("dependency_manifest")
         if type(binding) is not dict:
             continue
+        errors.extend(
+            _project_artifact_errors(
+                project_root,
+                binding,
+                f"question version evidence for {question_id} dependency manifest",
+            )
+        )
         matches = [
             artifact
             for artifact in artifacts
@@ -291,7 +361,9 @@ def _question_version_errors(
 
 
 def _accepted_model_interface_errors(
-    evidence: dict[str, object], handoff: dict[str, object] | None
+    evidence: dict[str, object],
+    handoff: dict[str, object] | None,
+    project_root: object,
 ) -> list[str]:
     errors: list[str] = []
     record = _validated_document(
@@ -312,6 +384,13 @@ def _accepted_model_interface_errors(
     artifacts = handoff.get("artifacts")
     assert type(artifacts) is list
     if type(binding) is dict:
+        errors.extend(
+            _project_artifact_errors(
+                project_root,
+                binding,
+                "accepted model interface specification",
+            )
+        )
         matches = [
             artifact
             for artifact in artifacts
@@ -328,10 +407,44 @@ def _accepted_model_interface_errors(
     return errors
 
 
+def _no_paper_model_artifact_errors(
+    handoff: dict[str, object] | None,
+    project_root: object,
+) -> list[str]:
+    """Verify every current modeling artifact used by no-paper completion."""
+
+    if handoff is None:
+        return []
+    artifacts = handoff.get("artifacts")
+    assert type(artifacts) is list
+    errors: list[str] = []
+    observed_kinds: set[str] = set()
+    for index, artifact in enumerate(artifacts):
+        if type(artifact) is not dict:
+            continue
+        kind = artifact.get("kind")
+        if kind not in _NO_PAPER_MODEL_KINDS:
+            continue
+        assert type(kind) is str
+        observed_kinds.add(kind)
+        errors.extend(
+            _project_artifact_errors(
+                project_root,
+                artifact,
+                f"no-paper completion {kind} artifact[{index}]",
+            )
+        )
+    for missing_kind in sorted(_NO_PAPER_MODEL_KINDS - observed_kinds):
+        errors.append(
+            f"no-paper completion requires a current {missing_kind} project artifact"
+        )
+    return errors
+
+
 def _paper_request_errors(
     action: str,
     evidence: dict[str, object],
-    trusted_user_event_verifier: object | None,
+    host_capability: object | None,
     *,
     allow_omitted_paper: bool = False,
 ) -> tuple[list[str], bool | None]:
@@ -355,27 +468,24 @@ def _paper_request_errors(
             "deliverables": deliverables,
         },
     )
-    if trusted_user_event_verifier is None:
+    if host_capability is None:
         errors.append(
-            "trusted user event verifier is required; a self-authored paper request "
+            "trusted process-local host capability is required; a self-authored paper request "
             "is non-authorizing"
         )
     else:
-        verify = getattr(trusted_user_event_verifier, "verify_user_event", None)
-        if not callable(verify):
-            errors.append("trusted user event verifier interface is invalid for paper request")
+        try:
+            verified = verify_host_user_event(
+                host_capability,
+                event_id=event.get("event_id"),
+                event_type="paper-request",
+                challenge_sha256=challenge,
+            )
+        except Exception as error:
+            errors.append(f"trusted paper request verification failed: {error}")
         else:
-            try:
-                verified = verify(
-                    event_id=event.get("event_id"),
-                    event_type="paper-request",
-                    challenge_sha256=challenge,
-                )
-            except Exception as error:
-                errors.append(f"trusted paper request verification failed: {error}")
-            else:
-                if verified != event:
-                    errors.append("paper request is not the trusted user event receipt")
+            if verified != event:
+                errors.append("paper request is not the trusted user event receipt")
     required_deliverable = {
         "paper-writing": "paper-writing",
         "paper-production": "paper-production",
@@ -404,6 +514,7 @@ def _paper_finalization_errors(
     evidence: dict[str, object],
     handoff: dict[str, object] | None,
     iteration: dict[str, object] | None,
+    project_root: object,
 ) -> list[str]:
     errors: list[str] = []
     envelope = evidence.get("paper_finalization")
@@ -419,43 +530,34 @@ def _paper_finalization_errors(
     if type(record) is not dict:
         errors.append("paper_finalization.record must be the complete Task 9 record")
         return errors
-    record_errors = validate_paper_finalization_record(record)
-    errors.extend(f"paper_finalization.record: {error}" for error in record_errors)
-    if type(recorded_hash) is not str or _HASH_RE.fullmatch(recorded_hash) is None:
-        errors.append("paper_finalization.sha256 must be a SHA-256 digest")
-    else:
-        try:
-            actual_hash = paper_finalization_sha256(record)
-        except ValueError as error:
-            errors.append(f"paper_finalization.record cannot be hashed: {error}")
-        else:
-            if recorded_hash != actual_hash:
-                errors.append(
-                    "paper_finalization.sha256 must match the complete canonical record"
-                )
+    authority: dict[str, object] | None = None
     if iteration is not None:
         active_iteration = iteration.get("active_iteration")
-        expected_path = (
-            f"iterations/{active_iteration}/paper/paper_finalization.json"
-        )
-        if path != expected_path:
-            errors.append(
-                "paper_finalization.path must be the active iteration readiness authority"
+        try:
+            authority = validate_paper_finalization_authority(
+                Path(project_root),  # type: ignore[arg-type]
+                str(active_iteration),
             )
-        if record.get("iteration") != active_iteration:
-            errors.append(
-                "paper_finalization.record iteration must match the active iteration"
-            )
+        except (OSError, TypeError, ValueError) as error:
+            errors.append(f"Task 9 finalization authority: {error}")
+        else:
+            if envelope != authority:
+                errors.append(
+                    "paper_finalization envelope must exactly match the current "
+                    "project-backed Task 9 authority"
+                )
     if handoff is not None:
         artifacts = handoff.get("artifacts")
         assert type(artifacts) is list
+        expected_path = authority.get("path") if authority is not None else path
+        expected_hash = authority.get("sha256") if authority is not None else recorded_hash
         matches = [
             artifact
             for artifact in artifacts
             if type(artifact) is dict
             and artifact.get("kind") == "paper-finalization"
-            and artifact.get("path") == path
-            and artifact.get("sha256") == recorded_hash
+            and artifact.get("path") == expected_path
+            and artifact.get("sha256") == expected_hash
         ]
         if len(matches) != 1:
             errors.append(
@@ -532,7 +634,8 @@ def _gate_errors(
     evidence: dict[str, object],
     handoff: dict[str, object] | None,
     iteration: dict[str, object] | None,
-    trusted_user_event_verifier: object | None,
+    project_root: object,
+    host_capability: object | None,
 ) -> list[str]:
     errors: list[str] = []
     if iteration is not None:
@@ -577,22 +680,36 @@ def _gate_errors(
     if handoff is not None:
         artifacts = handoff["artifacts"]
         assert type(artifacts) is list
-        current_scope = sorted(
-            [
-                {
-                    "path": artifact["path"],
-                    "kind": artifact["kind"],
-                    "sha256": artifact["sha256"],
-                }
-            for artifact in artifacts
-            if type(artifact) is dict
-            and artifact.get("kind") in GATE_SCOPE_KINDS[gate_id]
-            and type(artifact.get("path")) is str
-            and type(artifact.get("sha256")) is str
-            and _HASH_RE.fullmatch(str(artifact["sha256"])) is not None
-            ],
-            key=lambda item: (str(item["kind"]), str(item["path"])),
-        )
+        for index, artifact in enumerate(artifacts):
+            if (
+                type(artifact) is not dict
+                or artifact.get("kind") not in GATE_SCOPE_KINDS[gate_id]
+            ):
+                continue
+            path = artifact.get("path")
+            kind = artifact.get("kind")
+            digest = artifact.get("sha256")
+            if (
+                type(path) is not str
+                or type(kind) is not str
+                or type(digest) is not str
+                or _HASH_RE.fullmatch(digest) is None
+            ):
+                errors.append(
+                    f"{gate_id} current artifact[{index}] must include path, kind, "
+                    "and SHA-256"
+                )
+                continue
+            binding = {"path": path, "kind": kind, "sha256": digest}
+            current_scope.append(binding)
+            errors.extend(
+                _project_artifact_errors(
+                    project_root,
+                    binding,
+                    f"{gate_id} scoped artifact {path}",
+                )
+            )
+        current_scope.sort(key=lambda item: (str(item["kind"]), str(item["path"])))
     recorded_scope = record.get("artifact_scope")
     canonical_recorded_scope = _canonical_artifact_scope(recorded_scope)
     if canonical_recorded_scope != current_scope:
@@ -614,27 +731,24 @@ def _gate_errors(
                 "artifact_scope": canonical_recorded_scope,
             },
         )
-        if trusted_user_event_verifier is None:
+        if host_capability is None:
             errors.append(
-                f"{gate_id} trusted user event verifier is required; "
+                f"{gate_id} trusted process-local host capability is required; "
                 "a self-authored receipt is non-authorizing"
             )
         else:
-            verify = getattr(trusted_user_event_verifier, "verify_user_event", None)
-            if not callable(verify):
-                errors.append(f"{gate_id} trusted user event verifier interface is invalid")
+            try:
+                verified = verify_host_user_event(
+                    host_capability,
+                    event_id=confirmation.get("event_id"),
+                    event_type="gate-confirmation",
+                    challenge_sha256=challenge,
+                )
+            except Exception as error:
+                errors.append(f"{gate_id} trusted user event verification failed: {error}")
             else:
-                try:
-                    verified = verify(
-                        event_id=confirmation.get("event_id"),
-                        event_type="gate-confirmation",
-                        challenge_sha256=challenge,
-                    )
-                except Exception as error:
-                    errors.append(f"{gate_id} trusted user event verification failed: {error}")
-                else:
-                    if verified != confirmation:
-                        errors.append(f"{gate_id} confirmation is not the trusted event receipt")
+                if verified != confirmation:
+                    errors.append(f"{gate_id} confirmation is not the trusted event receipt")
     return errors
 
 
@@ -765,8 +879,8 @@ def authorization_errors(
     action: str,
     evidence: object,
     *,
-    trusted_user_event_verifier: object | None = None,
-    official_source_verifier: object | None = None,
+    project_root: str | Path | None = None,
+    host_capability: object | None = None,
 ) -> list[str]:
     """Return deterministic blockers for one requested orchestrator action."""
 
@@ -794,13 +908,21 @@ def authorization_errors(
                 action,
                 evidence,
                 official_type,
-                official_source_verifier,
+                host_capability,
             )
         )
         if action in {"current-rule-claim", "current-template-claim"}:
             return errors
 
     handoff = _validated_document(evidence, "handoff", "handoff", errors)
+    if action in _FORWARD_PROJECT_ACTIONS and handoff is not None:
+        state = handoff.get("state")
+        assert type(state) is dict
+        if state.get("status") not in {"in_progress", "complete"}:
+            errors.append(
+                f"{action} requires a current in_progress or complete project "
+                f"handoff; status {state.get('status')!r} is non-authorizing"
+            )
     initialization = _validated_document(
         evidence, "initialization", "initialization", errors
     )
@@ -820,6 +942,66 @@ def authorization_errors(
         "project-complete",
     }:
         iteration = _validated_document(evidence, "iteration", "iteration", errors)
+    if (
+        action in _FORWARD_PROJECT_ACTIONS
+        and iteration is not None
+        and iteration.get("status") != "in_progress"
+    ):
+        errors.append(
+            f"{action} requires the current in_progress iteration; "
+            f"status {iteration.get('status')!r} is non-authorizing"
+        )
+    if action in _FORWARD_PROJECT_ACTIONS and iteration is not None:
+        try:
+            project_current = load_current(Path(project_root))  # type: ignore[arg-type]
+        except (OSError, TypeError, ValueError) as error:
+            errors.append(f"canonical project current.json is required: {error}")
+        else:
+            if project_current != iteration:
+                errors.append(
+                    "authorization iteration must exactly match canonical project current.json"
+                )
+            if project_current.get("status") != "in_progress":
+                errors.append(
+                    "canonical project current.json status must be in_progress"
+                )
+    if action in _FORWARD_PROJECT_ACTIONS and handoff is not None and iteration is not None:
+        active_iteration = iteration.get("active_iteration")
+        try:
+            root = ensure_no_symlink_components(Path(project_root), "project_root")  # type: ignore[arg-type]
+            handoff_path = ensure_no_symlink_components(
+                root / f"iterations/{active_iteration}/state/handoff.json",
+                "active project handoff",
+            )
+            if not handoff_path.is_relative_to(root) or not stat.S_ISREG(
+                handoff_path.lstat().st_mode
+            ):
+                raise ValueError("active project handoff must be a regular project file")
+            project_handoff = load_json_strict(handoff_path)
+            project_handoff_errors = validate_document(
+                project_handoff,
+                kind="handoff",
+                mode="runtime",
+            )
+            if project_handoff_errors:
+                raise ValueError("; ".join(project_handoff_errors))
+        except (OSError, TypeError, ValueError) as error:
+            errors.append(f"canonical active project handoff is required: {error}")
+        else:
+            if project_handoff != handoff:
+                errors.append(
+                    "authorization handoff must exactly match the canonical active "
+                    "project handoff"
+                )
+            assert type(project_handoff) is dict
+            project_state = project_handoff.get("state")
+            if type(project_state) is not dict or project_state.get("status") not in {
+                "in_progress",
+                "complete",
+            }:
+                errors.append(
+                    "canonical active project handoff status is non-authorizing"
+                )
     if gate_id is not None:
         errors.extend(
             _gate_errors(
@@ -827,7 +1009,8 @@ def authorization_errors(
                 evidence,
                 handoff,
                 iteration,
-                trusted_user_event_verifier,
+                project_root,
+                host_capability,
             )
         )
     if action in _VALIDATION_ACTIONS or action in {
@@ -845,20 +1028,30 @@ def authorization_errors(
         "project-complete",
     }
     if route_requires_question_evidence:
-        errors.extend(_question_version_errors(evidence, handoff, iteration))
+        errors.extend(
+            _question_version_errors(evidence, handoff, iteration, project_root)
+        )
     if action == "model-solving":
         if handoff is not None:
             state = handoff["state"]
             assert type(state) is dict
             completed = state.get("completed_stages")
             invalidated = state.get("invalidated_stages")
+            if state.get("status") not in {"in_progress", "complete"}:
+                errors.append(
+                    "model-construction handoff status must be current before "
+                    "model-solving; needs_revision and other non-current statuses "
+                    "are non-authorizing"
+                )
             if type(completed) is not list or "model-construction" not in completed:
                 errors.append("model-construction must be complete before model-solving")
             if type(invalidated) is list and "model-construction" in invalidated:
                 errors.append("model-construction is invalidated and must be rerun")
         if iteration is not None and iteration.get("status") == "stale":
             errors.append("stale iteration cannot authorize model-solving")
-        errors.extend(_accepted_model_interface_errors(evidence, handoff))
+        errors.extend(
+            _accepted_model_interface_errors(evidence, handoff, project_root)
+        )
     paper_request_actions = {
         "paper-writing",
         "paper-production",
@@ -871,7 +1064,7 @@ def authorization_errors(
         request_errors, paper_requested = _paper_request_errors(
             action,
             evidence,
-            trusted_user_event_verifier,
+            host_capability,
             allow_omitted_paper=action == "project-complete",
         )
         errors.extend(request_errors)
@@ -908,11 +1101,19 @@ def authorization_errors(
                 evidence,
                 handoff,
                 iteration,
-                trusted_user_event_verifier,
+                project_root,
+                host_capability,
             )
         )
-        errors.extend(_paper_finalization_errors(evidence, handoff, iteration))
-    if action == "project-complete" and handoff is not None:
+        errors.extend(
+            _paper_finalization_errors(
+                evidence,
+                handoff,
+                iteration,
+                project_root,
+            )
+        )
+    if action in {"submission-readiness", "project-complete"} and handoff is not None:
         state = handoff.get("state")
         assert type(state) is dict
         completed = state.get("completed_stages")
@@ -920,9 +1121,13 @@ def authorization_errors(
             if type(completed) is not list or required_stage not in completed:
                 errors.append(
                     f"current {required_stage} stage must be complete before "
-                    "project completion"
+                    "submission readiness or project completion"
                 )
-        errors.extend(_accepted_model_interface_errors(evidence, handoff))
+        errors.extend(
+            _accepted_model_interface_errors(evidence, handoff, project_root)
+        )
+    if action == "project-complete" and paper_requested is False:
+        errors.extend(_no_paper_model_artifact_errors(handoff, project_root))
 
     return errors
 

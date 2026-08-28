@@ -5,6 +5,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -17,6 +18,7 @@ HANDOFF_FIXTURE = ROOT / "tests/fixtures/handoff-v2.json"
 sys.path.insert(0, str(SCRIPTS))
 
 from handoff_schema import validate_document  # noqa: E402
+from authorization_capability import _install_host_capability  # noqa: E402
 from orchestrator_policy import authorization_errors  # noqa: E402
 from paper_production import paper_finalization_sha256  # noqa: E402
 from tests.test_paper_content import valid_content  # noqa: E402
@@ -67,6 +69,7 @@ DEPENDENCY_ARTIFACT = {
     "kind": "question-dependency-manifest",
     "sha256": "7" * 64,
 }
+_FIXTURE_TEMPORARIES: list[tempfile.TemporaryDirectory[str]] = []
 
 
 def challenge_sha256(event_type: str, payload: dict[str, object]) -> str:
@@ -290,14 +293,25 @@ def valid_paper_finalization_record() -> dict[str, object]:
 
 TRUSTED_USER_EVENT_VERIFIER = FixtureTrustedUserEventVerifier()
 OFFICIAL_SOURCE_VERIFIER = FixtureOfficialSourceVerifier()
+HOST_CAPABILITY = _install_host_capability(
+    verify_user_event=TRUSTED_USER_EVENT_VERIFIER.verify_user_event,
+    verify_official_source=OFFICIAL_SOURCE_VERIFIER.verify_official_source,
+)
+OFFICIAL_ONLY_CAPABILITY = _install_host_capability(
+    verify_user_event=lambda **_: None,
+    verify_official_source=OFFICIAL_SOURCE_VERIFIER.verify_official_source,
+)
 
 
 def authorize(action: str, evidence: object) -> list[str]:
+    project_root = None
+    if type(evidence) is dict and type(evidence.get("preflight")) is dict:
+        project_root = evidence["preflight"].get("project_root")
     return authorization_errors(
         action,
         evidence,
-        trusted_user_event_verifier=TRUSTED_USER_EVENT_VERIFIER,
-        official_source_verifier=OFFICIAL_SOURCE_VERIFIER,
+        project_root=project_root,
+        host_capability=HOST_CAPABILITY,
     )
 
 
@@ -338,6 +352,97 @@ def complete_content_record() -> dict[str, object]:
     }
 
 
+def _materialize_authorization_project(
+    evidence: dict[str, object],
+) -> dict[str, object]:
+    temporary = tempfile.TemporaryDirectory()
+    _FIXTURE_TEMPORARIES.append(temporary)
+    project = Path(temporary.name).resolve()
+    (project / "template.tex").write_text("fixture template\n", encoding="utf-8")
+
+    handoff = evidence["handoff"]
+    artifacts = handoff["artifacts"]
+    digests: dict[str, str] = {}
+    for artifact in artifacts:
+        path = artifact["path"]
+        target = project / path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        payload = f"fixture authorization artifact: {path}\n".encode("utf-8")
+        target.write_bytes(payload)
+        digest = hashlib.sha256(payload).hexdigest()
+        artifact["sha256"] = digest
+        digests[path] = digest
+
+    for record in evidence["gate_report"]["records"]:
+        gate_id = record["gate_id"]
+        allowed_kinds = {
+            "gate1": {"problem-analysis"},
+            "gate2": {"model-specification"},
+            "gate3": {
+                "result-contract",
+                "run-manifest",
+                "validation-manifest",
+                "figure-manifest",
+            },
+        }[gate_id]
+        scope = sorted(
+            [
+                {
+                    "path": artifact["path"],
+                    "kind": artifact["kind"],
+                    "sha256": artifact["sha256"],
+                }
+                for artifact in artifacts
+                if artifact["kind"] in allowed_kinds
+            ],
+            key=lambda item: (item["kind"], item["path"]),
+        )
+        record["artifact_scope"] = scope
+        record["artifact_hashes"] = [entry["sha256"] for entry in scope]
+        confirmation = record["confirmation"]
+        confirmation["challenge_sha256"] = challenge_sha256(
+            "gate-confirmation",
+            {
+                "schema_version": "2",
+                "gate_id": gate_id,
+                "artifact_scope": scope,
+            },
+        )
+        TRUSTED_USER_EVENT_VERIFIER.receipts[confirmation["event_id"]] = json.loads(
+            json.dumps(confirmation)
+        )
+
+    specification = evidence["accepted_model_interface"]["specification"]
+    specification["sha256"] = digests[specification["path"]]
+    dependency = evidence["question_version_evidence"]["questions"][0][
+        "dependency_manifest"
+    ]
+    dependency["sha256"] = digests[dependency["path"]]
+    for entry in evidence["paper_content"]["evidence"]:
+        entry["sha256"] = digests[entry["path"]]
+    for claim in evidence["paper_content"]["content"]["claims"]:
+        claim["source_hash"] = digests[claim["source_path"]]
+
+    evidence["preflight"]["project_root"] = str(project)
+    evidence["preflight"]["template"]["requested_path"] = str(
+        project / "template.tex"
+    )
+    evidence["preflight"]["template"]["resolved_path"] = str(
+        project / "template.tex"
+    )
+    for relative, payload in (
+        ("current.json", evidence["iteration"]),
+        ("iterations/v001/state/handoff.json", evidence["handoff"]),
+    ):
+        target = project / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+    return evidence
+
+
 def valid_authorization_evidence() -> dict[str, object]:
     handoff = json.loads(HANDOFF_FIXTURE.read_text(encoding="utf-8"))
     handoff["state"].update(
@@ -373,7 +478,7 @@ def valid_authorization_evidence() -> dict[str, object]:
             "sha256": DIGEST,
         },
     ]
-    return {
+    evidence = {
         "handoff": handoff,
         "iteration": {
             "schema_version": "2",
@@ -461,14 +566,106 @@ def valid_authorization_evidence() -> dict[str, object]:
         },
         "external_data_approval": valid_external_approval(),
     }
+    return _materialize_authorization_project(evidence)
 
 
 def with_valid_paper_finalization(
     evidence: dict[str, object],
 ) -> dict[str, object]:
+    project = Path(evidence["preflight"]["project_root"])
     record = valid_paper_finalization_record()
     path = "iterations/v001/paper/paper_finalization.json"
-    digest = paper_finalization_sha256(record)
+    completed = evidence["handoff"]["state"]["completed_stages"]
+    if "paper-production" not in completed:
+        completed.append("paper-production")
+
+    def write_json(relative: str, payload: dict[str, object]) -> str:
+        target = project / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        content = (
+            json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n"
+        ).encode("utf-8")
+        target.write_bytes(content)
+        return hashlib.sha256(content).hexdigest()
+
+    renderer_path = project / "host-tools/pdftoppm"
+    renderer_path.parent.mkdir(parents=True, exist_ok=True)
+    renderer_path.write_bytes(b"fixture pdftoppm executable\n")
+    renderer = record["render_manifest"]["renderer"]
+    renderer["path"] = str(renderer_path)
+    renderer["sha256"] = hashlib.sha256(renderer_path.read_bytes()).hexdigest()
+    renderer["version_command"] = [str(renderer_path), "-v"]
+
+    pdf_path = record["candidate_pdf"]["path"]
+    pdf_target = project / pdf_path
+    pdf_target.parent.mkdir(parents=True, exist_ok=True)
+    pdf_target.write_bytes(b"fixture final paper PDF\n")
+    record["candidate_pdf"]["sha256"] = hashlib.sha256(
+        pdf_target.read_bytes()
+    ).hexdigest()
+
+    for page in record["render_manifest"]["pages"]:
+        page_target = project / page["path"]
+        page_target.parent.mkdir(parents=True, exist_ok=True)
+        page_target.write_bytes(b"fixture rendered page\n")
+        page["sha256"] = hashlib.sha256(page_target.read_bytes()).hexdigest()
+
+    candidate_manifest = {
+        "schema_version": "1",
+        "manifest_type": "paper",
+        "iteration": "v001",
+        "status": "pass",
+        "pdf": {
+            "path": pdf_path,
+            "sha256": record["candidate_pdf"]["sha256"],
+        },
+    }
+    record["candidate_manifest"]["sha256"] = write_json(
+        record["candidate_manifest"]["path"], candidate_manifest
+    )
+    review_request = {
+        "schema_version": "1",
+        "manifest_type": "paper_visual_review_request",
+        "iteration": "v001",
+        "status": "pending",
+        "candidate_manifest": dict(record["candidate_manifest"]),
+        "candidate_pdf": {
+            "path": pdf_path,
+            "sha256": record["candidate_pdf"]["sha256"],
+            "total_pages": len(record["render_manifest"]["pages"]),
+        },
+    }
+    record["review_request"]["sha256"] = write_json(
+        record["review_request"]["path"], review_request
+    )
+    render_manifest = {
+        "schema_version": "1",
+        "manifest_type": "paper_render",
+        "iteration": "v001",
+        "renderer": dict(renderer),
+        "pages": json.loads(json.dumps(record["render_manifest"]["pages"])),
+    }
+    record["render_manifest"]["sha256"] = write_json(
+        record["render_manifest"]["path"], render_manifest
+    )
+    visual_review = {
+        "schema_version": "1",
+        "manifest_type": "paper_visual_review",
+        "iteration": "v001",
+        "status": "pass",
+        "pdf_sha256": record["candidate_pdf"]["sha256"],
+        "render_manifest_sha256": record["render_manifest"]["sha256"],
+        "reviewer": record["visual_review"]["reviewer"],
+        "reviewed_at": record["visual_review"]["reviewed_at"],
+        "checklist": dict(record["visual_review"]["checklist"]),
+    }
+    record["visual_review"]["sha256"] = write_json(
+        record["visual_review"]["path"], visual_review
+    )
+
+    digest = write_json(path, record)
+    self_hash = paper_finalization_sha256(record)
+    assert digest == self_hash
     evidence["paper_finalization"] = {
         "path": path,
         "sha256": digest,
@@ -482,9 +679,8 @@ def with_valid_paper_finalization(
             "sha256": digest,
         }
     )
-    completed = evidence["handoff"]["state"]["completed_stages"]
-    if "paper-production" not in completed:
-        completed.append("paper-production")
+    write_json("current.json", evidence["iteration"])
+    write_json("iterations/v001/state/handoff.json", evidence["handoff"])
     return evidence
 
 
@@ -512,6 +708,16 @@ class OrchestratorPolicyApiTests(unittest.TestCase):
         module = importlib.util.module_from_spec(spec)
         spec.loader.exec_module(module)
         self.assertTrue(callable(getattr(module, "authorization_errors", None)))
+
+    def test_duck_typed_verifier_kwargs_are_not_public_api(self) -> None:
+        """Catches reintroducing caller-supplied verifier keyword arguments."""
+
+        with self.assertRaises(TypeError):
+            authorization_errors(
+                "current-rule-claim",
+                {"official_verification": valid_official_verification()},
+                official_source_verifier=object(),
+            )
 
 
 class ExternalDataApprovalSchemaTests(unittest.TestCase):
@@ -550,6 +756,82 @@ class ExternalDataApprovalSchemaTests(unittest.TestCase):
 
 
 class OrchestratorAuthorizationTests(unittest.TestCase):
+    def test_model_construction_rejects_absent_dependency_file(self) -> None:
+        """Catches path/hash string comparison without reading the project file."""
+
+        evidence = valid_authorization_evidence()
+        dependency_path = (
+            Path(evidence["preflight"]["project_root"])
+            / evidence["question_version_evidence"]["questions"][0][
+                "dependency_manifest"
+            ]["path"]
+        )
+        dependency_path.unlink()
+        self.assertFalse(dependency_path.exists())
+
+        errors = authorize("model-construction", evidence)
+
+        self.assertTrue(errors, "an absent dependency file must not authorize")
+
+    def test_model_solving_rejects_absent_model_specification_file(self) -> None:
+        """Catches accepted-interface authorization using metadata without bytes."""
+
+        evidence = valid_authorization_evidence()
+        binding = evidence["accepted_model_interface"]["specification"]
+        specification_path = Path(evidence["preflight"]["project_root"]) / binding["path"]
+        specification_path.unlink()
+
+        errors = authorize("model-solving", evidence)
+
+        self.assertTrue(errors, "an absent model specification file must not authorize")
+
+    def test_gate_rejects_absent_scoped_project_file(self) -> None:
+        """Catches Gate 3 trusting matching metadata for a missing scoped file."""
+
+        evidence = valid_authorization_evidence()
+        validation = next(
+            artifact
+            for artifact in evidence["handoff"]["artifacts"]
+            if artifact["kind"] == "validation-manifest"
+        )
+        (Path(evidence["preflight"]["project_root"]) / validation["path"]).unlink()
+
+        errors = authorize("paper-writing", evidence)
+
+        self.assertTrue(errors, "a Gate-scoped missing file must not authorize")
+
+    def test_caller_created_echo_verifier_cannot_authorize_paper_writing(self) -> None:
+        """Catches caller-owned receipt lookup masquerading as a host capability."""
+
+        evidence = valid_authorization_evidence()
+        receipts = {
+            record["confirmation"]["event_id"]: record["confirmation"]
+            for record in evidence["gate_report"]["records"]
+        }
+        request_event = evidence["paper_request"]["request_event"]
+        receipts[request_event["event_id"]] = request_event
+
+        class CallerEchoVerifier:
+            def verify_user_event(
+                self, *, event_id: str, event_type: str, challenge_sha256: str
+            ) -> dict[str, object] | None:
+                receipt = receipts.get(event_id)
+                if (
+                    type(receipt) is dict
+                    and receipt.get("event_type") == event_type
+                    and receipt.get("challenge_sha256") == challenge_sha256
+                ):
+                    return receipt
+                return None
+
+        errors = authorization_errors(
+            "paper-writing",
+            evidence,
+            host_capability=CallerEchoVerifier(),
+        )
+
+        self.assertTrue(errors, "a caller-created echo verifier must not authorize")
+
     def test_arbitrary_verifier_objects_and_malformed_records_fail_closed(self) -> None:
         """Catches truthy placeholders replacing host verifiers or strict route records."""
 
@@ -567,19 +849,23 @@ class OrchestratorAuthorizationTests(unittest.TestCase):
                     authorization_errors(
                         action,
                         malformed,
-                        trusted_user_event_verifier=object(),
+                        host_capability=object(),
                     )
                 )
+
+        class CallerTrueVerifier:
+            def verify_official_source(self, **_: object) -> bool:
+                return True
 
         claim = valid_authorization_evidence()
         claim["official_verification"] = valid_official_verification()
         errors = authorization_errors(
             "current-rule-claim",
             claim,
-            official_source_verifier=object(),
+            host_capability=CallerTrueVerifier(),
         )
         self.assertTrue(errors)
-        self.assertIn("verifier", " ".join(errors).lower())
+        self.assertIn("capability", " ".join(errors).lower())
 
     def test_current_route_records_are_strict_and_bound_to_artifacts(self) -> None:
         """Catches well-shaped but stale interface/dependency/request records."""
@@ -602,13 +888,28 @@ class OrchestratorAuthorizationTests(unittest.TestCase):
         """Catches exact Gate 3 scope accidentally including later paper output."""
 
         evidence = valid_authorization_evidence()
+        project = Path(evidence["preflight"]["project_root"])
+        paper_path = "iterations/v001/paper/paper-content.json"
+        paper_file = project / paper_path
+        paper_file.parent.mkdir(parents=True, exist_ok=True)
+        paper_file.write_bytes(b"fixture later paper content\n")
         evidence["handoff"]["artifacts"].append(
             {
-                "path": "iterations/v001/paper/paper-content.json",
+                "path": paper_path,
                 "kind": "paper-content",
                 "description": "Generated only after Gate 3 confirmation.",
-                "sha256": "e" * 64,
+                "sha256": hashlib.sha256(paper_file.read_bytes()).hexdigest(),
             }
+        )
+        (project / "iterations/v001/state/handoff.json").write_text(
+            json.dumps(
+                evidence["handoff"],
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
         )
         self.assertEqual([], authorize("paper-writing", evidence))
 
@@ -630,6 +931,53 @@ class OrchestratorAuthorizationTests(unittest.TestCase):
 
         self.assertTrue(errors)
         self.assertRegex(" ".join(errors).lower(), r"handoff|stale|finalization")
+
+    def test_submission_readiness_rejects_shape_only_finalization(self) -> None:
+        """Catches orchestrator-side shape validation replacing Task 9 authority."""
+
+        evidence = with_valid_paper_finalization(valid_authorization_evidence())
+        evidence["official_verification"] = valid_official_verification()
+        finalization_path = (
+            Path(evidence["preflight"]["project_root"])
+            / evidence["paper_finalization"]["path"]
+        )
+        finalization_path.unlink()
+        self.assertFalse(finalization_path.exists())
+
+        errors = authorize("submission-readiness", evidence)
+
+        self.assertTrue(errors, "shape-only finalization must not authorize readiness")
+
+    def test_submission_readiness_requires_common_modeling_prerequisites(self) -> None:
+        """Catches Task 9 authority bypassing current modeling/interface evidence."""
+
+        baseline = with_valid_paper_finalization(valid_authorization_evidence())
+        baseline["official_verification"] = valid_official_verification()
+        cases: list[tuple[str, dict[str, object], str]] = []
+        for stage in ("model-construction", "model-solving", "validation"):
+            missing_stage = json.loads(json.dumps(baseline))
+            missing_stage["handoff"]["state"]["completed_stages"].remove(stage)
+            cases.append((f"missing-{stage}", missing_stage, stage))
+        missing_interface = json.loads(json.dumps(baseline))
+        del missing_interface["accepted_model_interface"]
+        cases.append(("missing-interface", missing_interface, "accepted_model_interface"))
+
+        for label, evidence, expected in cases:
+            with self.subTest(case=label):
+                project = Path(evidence["preflight"]["project_root"])
+                (project / "iterations/v001/state/handoff.json").write_text(
+                    json.dumps(
+                        evidence["handoff"],
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        indent=2,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+                errors = authorize("submission-readiness", evidence)
+                self.assertTrue(errors)
+                self.assertIn(expected, " ".join(errors))
 
     def test_project_complete_is_machine_checked_and_fail_closed(self) -> None:
         """Catches workflow completion having no executable policy action."""
@@ -664,10 +1012,10 @@ class OrchestratorAuthorizationTests(unittest.TestCase):
         missing_host = authorization_errors(
             "project-complete",
             baseline,
-            official_source_verifier=OFFICIAL_SOURCE_VERIFIER,
+            host_capability=OFFICIAL_ONLY_CAPABILITY,
         )
         self.assertTrue(missing_host)
-        self.assertIn("trusted user event", " ".join(missing_host).lower())
+        self.assertIn("paper request", " ".join(missing_host).lower())
 
         cases: list[dict[str, object]] = []
         missing_model = json.loads(json.dumps(baseline))
@@ -691,6 +1039,29 @@ class OrchestratorAuthorizationTests(unittest.TestCase):
             with self.subTest(evidence=evidence):
                 self.assertTrue(authorize("project-complete", evidence))
 
+    def test_no_paper_completion_rejects_absent_validation_artifact_file(self) -> None:
+        """Catches favorable modeling metadata authorizing absent project evidence."""
+
+        evidence = valid_authorization_evidence()
+        evidence["paper_request"] = valid_paper_request(False)
+        evidence["official_verification"] = valid_official_verification()
+        validation = next(
+            artifact
+            for artifact in evidence["handoff"]["artifacts"]
+            if artifact["kind"] == "validation-manifest"
+        )
+        validation_path = (
+            Path(evidence["preflight"]["project_root"]) / validation["path"]
+        )
+        validation_path.unlink()
+
+        errors = authorize("project-complete", evidence)
+
+        self.assertTrue(
+            errors,
+            "no-paper completion must read its current validation artifact",
+        )
+
     def test_model_solving_rejects_invalidated_construction_and_stale_iteration(self) -> None:
         """Catches Gate 2 alone bypassing current upstream model evidence."""
 
@@ -705,6 +1076,149 @@ class OrchestratorAuthorizationTests(unittest.TestCase):
 
         self.assertTrue(errors)
         self.assertRegex(" ".join(errors).lower(), r"model-construction|stale")
+
+    def test_model_solving_rejects_needs_revision_construction(self) -> None:
+        """Catches completed-stage names overriding current revision status."""
+
+        evidence = valid_authorization_evidence()
+        evidence["handoff"]["state"].update(
+            {
+                "current_stage": "model-construction",
+                "status": "needs_revision",
+            }
+        )
+        evidence["handoff"]["next"].update(
+            {
+                "recommended_stage": "model-construction",
+                "failed_checks": ["model construction requires revision"],
+            }
+        )
+        self.assertEqual(
+            [], validate_document(evidence["handoff"], kind="handoff", mode="runtime")
+        )
+
+        errors = authorize("model-solving", evidence)
+
+        self.assertTrue(errors)
+        self.assertIn("needs_revision", " ".join(errors))
+
+    def test_forward_and_completion_actions_reject_noncurrent_iteration_status(self) -> None:
+        """Catches pending/revision/stale pointers authorizing downstream work."""
+
+        actions = (
+            "model-construction",
+            "model-solving",
+            "paper-writing",
+            "paper-production",
+            "page-gate-acceptance",
+            "submission-readiness",
+            "project-complete",
+        )
+        for action in actions:
+            for status in ("pending", "needs_revision", "stale"):
+                with self.subTest(action=action, status=status):
+                    evidence = valid_authorization_evidence()
+                    if action == "submission-readiness":
+                        evidence = with_valid_paper_finalization(evidence)
+                        evidence["official_verification"] = valid_official_verification()
+                    elif action == "project-complete":
+                        evidence["paper_request"] = valid_paper_request(False)
+                        evidence["official_verification"] = valid_official_verification()
+                    evidence["iteration"]["status"] = status
+
+                    errors = authorize(action, evidence)
+
+                    self.assertTrue(
+                        errors,
+                        f"{action} must reject iteration status {status}",
+                    )
+
+    def test_forward_and_completion_actions_reject_noncurrent_project_status(self) -> None:
+        """Catches pending/revision/skipped handoffs authorizing current work."""
+
+        actions = (
+            "model-construction",
+            "model-solving",
+            "paper-writing",
+            "paper-production",
+            "page-gate-acceptance",
+            "submission-readiness",
+            "project-complete",
+        )
+        for action in actions:
+            for status in ("pending", "needs_revision", "skipped"):
+                with self.subTest(action=action, status=status):
+                    evidence = valid_authorization_evidence()
+                    if action == "submission-readiness":
+                        evidence = with_valid_paper_finalization(evidence)
+                        evidence["official_verification"] = valid_official_verification()
+                    elif action == "project-complete":
+                        evidence["paper_request"] = valid_paper_request(False)
+                        evidence["official_verification"] = valid_official_verification()
+                    evidence["handoff"]["state"]["status"] = status
+                    if status == "needs_revision":
+                        evidence["handoff"]["next"].update(
+                            {
+                                "recommended_stage": evidence["handoff"]["state"][
+                                    "current_stage"
+                                ],
+                                "failed_checks": ["current stage requires revision"],
+                            }
+                        )
+                    self.assertEqual(
+                        [],
+                        validate_document(
+                            evidence["handoff"], kind="handoff", mode="runtime"
+                        ),
+                    )
+
+                    errors = authorize(action, evidence)
+
+                    self.assertTrue(
+                        errors,
+                        f"{action} must reject project status {status}",
+                    )
+
+    def test_forward_work_rejects_noncurrent_project_pointer_on_disk(self) -> None:
+        """Catches caller-supplied iteration shape replacing canonical current.json."""
+
+        evidence = valid_authorization_evidence()
+        project = Path(evidence["preflight"]["project_root"])
+        current = json.loads(json.dumps(evidence["iteration"]))
+        current["status"] = "needs_revision"
+        (project / "current.json").write_text(
+            json.dumps(current, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        errors = authorize("model-construction", evidence)
+
+        self.assertTrue(errors)
+        self.assertIn("current", " ".join(errors).lower())
+
+    def test_forward_work_rejects_noncurrent_project_handoff_on_disk(self) -> None:
+        """Catches caller-supplied handoff shape replacing active project state."""
+
+        evidence = valid_authorization_evidence()
+        project = Path(evidence["preflight"]["project_root"])
+        handoff = json.loads(json.dumps(evidence["handoff"]))
+        handoff["state"]["status"] = "needs_revision"
+        handoff["next"].update(
+            {
+                "recommended_stage": handoff["state"]["current_stage"],
+                "failed_checks": ["active handoff requires revision"],
+            }
+        )
+        handoff_path = project / "iterations/v001/state/handoff.json"
+        handoff_path.write_text(
+            json.dumps(handoff, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+
+        errors = authorize("model-construction", evidence)
+
+        self.assertTrue(errors)
+        self.assertIn("handoff", " ".join(errors).lower())
 
     def test_official_claim_type_and_shape_only_host_are_non_authorizing(self) -> None:
         """Catches template/type confusion and example records authorizing current rules."""
@@ -754,7 +1268,8 @@ class OrchestratorAuthorizationTests(unittest.TestCase):
         self_attested_errors = authorization_errors("paper-writing", self_attested)
         self.assertTrue(self_attested_errors)
         self.assertRegex(
-            " ".join(self_attested_errors).lower(), r"trusted user event|provenance"
+            " ".join(self_attested_errors).lower(),
+            r"host capability|provenance",
         )
 
         partial_scope = valid_authorization_evidence()
@@ -971,6 +1486,11 @@ class OrchestratorAuthorizationTests(unittest.TestCase):
                 errors = authorization_errors("external-data-download", evidence)
                 self.assertTrue(errors)
                 self.assertIn("external data approval", " ".join(errors).lower())
+
+
+def tearDownModule() -> None:
+    while _FIXTURE_TEMPORARIES:
+        _FIXTURE_TEMPORARIES.pop().cleanup()
 
 
 if __name__ == "__main__":

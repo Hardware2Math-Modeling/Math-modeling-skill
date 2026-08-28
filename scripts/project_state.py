@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Sequence
 from uuid import uuid4
 
+from authorization_capability import verify_user_event as verify_host_user_event
 from handoff_schema import (
     GATE_REQUIRED_SCOPE_KINDS,
     GATE_SCOPE_KINDS,
@@ -403,7 +404,7 @@ def record_gate(
     note: str,
     artifact_scope: Sequence[dict[str, object]] | None = None,
     confirmation_event_id: str | None = None,
-    trusted_user_event_verifier: object | None = None,
+    host_capability: object | None = None,
     confirmation: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Append one auditable gate record and return the updated gate report."""
@@ -454,10 +455,10 @@ def record_gate(
         if (
             type(confirmation_event_id) is not str
             or not confirmation_event_id.strip()
-            or trusted_user_event_verifier is None
+            or host_capability is None
         ):
             raise ValueError(
-                "confirmed gates require a trusted user event id and host verifier"
+                "confirmed gates require a trusted user event id and host capability"
             )
         missing_kinds = GATE_REQUIRED_SCOPE_KINDS[gate_id] - {
             str(item["kind"]) for item in normalized_scope
@@ -475,11 +476,9 @@ def record_gate(
                 "artifact_scope": normalized_scope,
             },
         )
-        verify = getattr(trusted_user_event_verifier, "verify_user_event", None)
-        if not callable(verify):
-            raise ValueError("trusted user event verifier interface is invalid")
         try:
-            verified = verify(
+            verified = verify_host_user_event(
+                host_capability,
                 event_id=confirmation_event_id,
                 event_type="gate-confirmation",
                 challenge_sha256=challenge,
@@ -501,7 +500,7 @@ def record_gate(
         confirmation = copy.deepcopy(validated_confirmation)
     elif any(
         value is not None
-        for value in (confirmation, confirmation_event_id, trusted_user_event_verifier)
+        for value in (confirmation, confirmation_event_id, host_capability)
     ):
         raise ValueError("confirmation evidence is allowed only for a confirmed gate")
 
@@ -677,7 +676,7 @@ def _parser() -> argparse.ArgumentParser:
     gate.add_argument(
         "--artifact-scope-file",
         type=_absolute_cli_path,
-        help="Gate scope only; confirmed status also requires a host verifier integration.",
+        help="Gate scope only; confirmed status also requires a process-local host capability.",
     )
     gate.add_argument("--note", default="")
 

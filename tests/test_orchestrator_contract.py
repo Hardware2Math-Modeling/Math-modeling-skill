@@ -178,7 +178,7 @@ class OrchestratorContractTests(unittest.TestCase):
         text = ORCHESTRATOR.read_text(encoding="utf-8")
         self.assertIn("Oral approval", text)
         self.assertIn("current.json", text)
-        self.assertIn("host verifier", text)
+        self.assertIn("host capability", text)
 
     def test_gate_placement_is_fail_closed(self) -> None:
         """Catches model, solve, or paper routes occurring before their decision gate."""

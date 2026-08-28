@@ -1786,6 +1786,34 @@ class PaperProductionTests(unittest.TestCase):
                     paper_production.validate_paper_finalization_record(payload)
                 )
 
+    def test_project_backed_finalization_authority_loads_every_bound_file(self) -> None:
+        """Catches shape-valid finalization authorizing absent subordinate files."""
+
+        validator = getattr(
+            paper_production, "validate_paper_finalization_authority", None
+        )
+        self.assertTrue(
+            callable(validator),
+            "Task 9 must expose a project-backed finalization authority validator",
+        )
+        if not callable(validator):
+            return
+
+        project, _, _, _, _, review, _ = self.prepare_visual_finalization()
+        final = paper_production.finalize_paper(project, "v001", review)
+        authority = validator(project, "v001")
+        self.assertEqual(final, authority["record"])
+        self.assertEqual(
+            "iterations/v001/paper/paper_finalization.json", authority["path"]
+        )
+        self.assertEqual(
+            sha256_file(project / authority["path"]), authority["sha256"]
+        )
+
+        (project / final["candidate_manifest"]["path"]).unlink()
+        with self.assertRaisesRegex(ValueError, "candidate manifest"):
+            validator(project, "v001")
+
     def test_finalization_rejects_stale_or_incomplete_visual_evidence(self) -> None:
         cases = (
             "wrong_pdf",

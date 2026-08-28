@@ -1303,6 +1303,162 @@ def validate_paper_finalization_record(payload: object) -> list[str]:
     return errors
 
 
+def validate_paper_finalization_authority(
+    project_root: Path,
+    active_iteration: str,
+) -> dict[str, object]:
+    """Load and verify the canonical active-iteration readiness authority.
+
+    The returned envelope is derived from project bytes.  Every file named by the
+    finalization record is opened as a non-symlink regular file and hash-checked;
+    JSON subordinates are also loaded and checked against their final bindings.
+    """
+
+    project = _directory(Path(project_root), "project root")
+    if (
+        type(active_iteration) is not str
+        or _ITERATION_RE.fullmatch(active_iteration) is None
+    ):
+        raise ValueError("active iteration must use canonical vNNN form")
+    current = load_current(project)
+    if current.get("active_iteration") != active_iteration:
+        raise ValueError("paper finalization authority must belong to the active iteration")
+    if current.get("status") not in {"in_progress", "complete"}:
+        raise ValueError("paper finalization authority requires a current project status")
+    gates = current.get("gates")
+    if type(gates) is not dict or gates.get("gate3") != "confirmed":
+        raise ValueError("Gate 3 must remain confirmed for finalization authority")
+    iteration_root = _directory(
+        project / "iterations" / active_iteration,
+        "active iteration",
+    )
+    _current_validation(iteration_root)
+    _staleness_check(project)
+
+    relative_path = (
+        f"iterations/{active_iteration}/paper/paper_finalization.json"
+    )
+    finalization_path = _project_evidence_file(
+        project,
+        relative_path,
+        "paper finalization authority",
+    )
+    record = _strict_json(finalization_path, "paper finalization authority")
+    if finalization_path.read_bytes() != _canonical_json_bytes(record):
+        raise ValueError("paper finalization authority must use canonical JSON bytes")
+    record_errors = validate_paper_finalization_record(record)
+    if record_errors:
+        raise ValueError("invalid paper finalization authority: " + "; ".join(record_errors))
+    if record.get("iteration") != active_iteration:
+        raise ValueError("paper finalization record iteration is not current")
+
+    def bound_file(binding: object, label: str) -> Path:
+        exact = _exact_keys(binding, {"path", "sha256"}, f"{label} binding")
+        target = _project_evidence_file(project, exact.get("path"), label)
+        if exact.get("sha256") != sha256_file(target):
+            raise ValueError(f"{label} hash does not match project bytes")
+        return target
+
+    manifest_path = bound_file(record.get("candidate_manifest"), "candidate manifest")
+    pdf_path = bound_file(record.get("candidate_pdf"), "candidate PDF")
+    request_path = bound_file(record.get("review_request"), "visual review request")
+    render_binding = _exact_keys(
+        record.get("render_manifest"),
+        {"path", "sha256", "renderer", "pages"},
+        "render manifest binding",
+    )
+    render_path = bound_file(
+        {"path": render_binding.get("path"), "sha256": render_binding.get("sha256")},
+        "render manifest",
+    )
+    review_binding = _exact_keys(
+        record.get("visual_review"),
+        {"path", "sha256", "reviewer", "reviewed_at", "checklist"},
+        "visual review binding",
+    )
+    review_path = bound_file(
+        {"path": review_binding.get("path"), "sha256": review_binding.get("sha256")},
+        "visual review",
+    )
+
+    pages = render_binding.get("pages")
+    if type(pages) is not list or not pages:
+        raise ValueError("render manifest authority must bind at least one page")
+    for index, page in enumerate(pages):
+        page_binding = _exact_keys(
+            page,
+            {"page", "path", "sha256", "width_px", "height_px"},
+            f"rendered page {index + 1}",
+        )
+        bound_file(
+            {"path": page_binding.get("path"), "sha256": page_binding.get("sha256")},
+            f"rendered page {index + 1}",
+        )
+
+    renderer = _exact_keys(
+        render_binding.get("renderer"),
+        {
+            "name",
+            "status",
+            "path",
+            "sha256",
+            "version_command",
+            "version_exit_code",
+            "version_signature",
+            "version_output",
+            "version_output_sha256",
+            "trust_basis",
+        },
+        "renderer binding",
+    )
+    renderer_path = _regular_file(Path(str(renderer.get("path"))), "renderer executable")
+    if renderer.get("sha256") != sha256_file(renderer_path):
+        raise ValueError("renderer executable hash does not match finalization authority")
+
+    manifest = _strict_json(manifest_path, "candidate manifest")
+    request = _strict_json(request_path, "visual review request")
+    render = _strict_json(render_path, "render manifest")
+    review = _strict_json(review_path, "visual review")
+    if (
+        manifest.get("iteration") != active_iteration
+        or manifest.get("status") != "pass"
+        or manifest.get("pdf", {}).get("path") != record["candidate_pdf"]["path"]
+        or manifest.get("pdf", {}).get("sha256") != sha256_file(pdf_path)
+    ):
+        raise ValueError("candidate manifest is stale or not bound to the final PDF")
+    if (
+        request.get("iteration") != active_iteration
+        or request.get("candidate_manifest") != record["candidate_manifest"]
+        or type(request.get("candidate_pdf")) is not dict
+        or request["candidate_pdf"].get("path") != record["candidate_pdf"]["path"]
+        or request["candidate_pdf"].get("sha256") != record["candidate_pdf"]["sha256"]
+    ):
+        raise ValueError("visual review request is stale or not bound to finalization")
+    if (
+        render.get("iteration") != active_iteration
+        or render.get("manifest_type") != "paper_render"
+        or render.get("renderer") != render_binding.get("renderer")
+        or render.get("pages") != pages
+    ):
+        raise ValueError("render manifest is stale or not bound to finalization")
+    if (
+        review.get("iteration") != active_iteration
+        or review.get("status") != "pass"
+        or review.get("pdf_sha256") != record["candidate_pdf"]["sha256"]
+        or review.get("render_manifest_sha256") != render_binding.get("sha256")
+        or review.get("reviewer") != review_binding.get("reviewer")
+        or review.get("reviewed_at") != review_binding.get("reviewed_at")
+        or review.get("checklist") != review_binding.get("checklist")
+    ):
+        raise ValueError("visual review is stale or not bound to finalization")
+
+    return {
+        "path": relative_path,
+        "sha256": sha256_file(finalization_path),
+        "record": record,
+    }
+
+
 def _publication_transaction_id(manifest_bytes: bytes, request_bytes: bytes) -> str:
     digest = hashlib.sha256()
     for content in (manifest_bytes, request_bytes):
@@ -3180,4 +3336,6 @@ __all__ = [
     "recover_paper_publication",
     "render_paper_pages",
     "select_template",
+    "validate_paper_finalization_authority",
+    "validate_paper_finalization_record",
 ]
