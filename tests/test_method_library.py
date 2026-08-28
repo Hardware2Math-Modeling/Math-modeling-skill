@@ -596,6 +596,11 @@ class MethodLibraryTests(unittest.TestCase):
             any("非对角" in check and "残差" in check for check in item["validation"])
         )
 
+    def test_pca_catalog_memory_complexity_accounts_for_sample_matrices(self) -> None:
+        item = next(entry for entry in load_catalog() if entry["id"] == "pca-reduction")
+
+        self.assertIn("内存 O(np+p^2)", item["scale_limit"])
+
     def test_every_direct_solve_rejects_nonfinite_input_even_when_unused(self) -> None:
         fixture_payload = _strict_json(LIBRARY / "assets/fixtures/method-smoke.json")
         fixtures = {fixture["method_id"]: fixture for fixture in fixture_payload["fixtures"]}

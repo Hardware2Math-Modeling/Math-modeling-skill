@@ -245,7 +245,7 @@
     "assumptions": ["样本可比较且缺失已处理", "特征中心化，是否标准化已明确", "模板仅提取第一主成分"],
     "inputs": [{"name": "matrix", "meaning": "样本乘特征矩阵", "units": "各列单位；必要时先标准化"}, {"name": "iterations", "meaning": "循环 Jacobi 完整扫描的最大整数预算；一次扫描按固定顺序访问全部特征对；默认 20，范围 1 至 50，达到整矩阵收敛证书时提前停止", "units": "次完整扫描"}],
     "formula": "对中心化协方差矩阵做确定性对称 Jacobi 对角化，要求 ||offdiag(V^T C V)||_F<=1e-12*trace(C)，再以原协方差残差认证并选 Rayleigh 商最大的特征向量，score=X_centered v。",
-    "scale_limit": "O(np^2+sweeps*p^3)，内存 O(p^2)；每次扫描至多 p(p-1)/2 次旋转，默认 20、硬上限 50 次扫描；纯 Python 输入硬上限 p<=50，更大或多成分问题必须改用预检依赖中的稳定 SVD/对称特征求解器。",
+    "scale_limit": "O(np^2+sweeps*p^3)，内存 O(np+p^2)：模板同时物化 n×p 输入矩阵与 n×p 中心化矩阵，并保留 p×p 协方差/Jacobi 状态；每次扫描至多 p(p-1)/2 次旋转，默认 20、硬上限 50 次扫描；纯 Python 输入硬上限 p<=50，更大或多成分问题必须改用预检依赖中的稳定 SVD/对称特征求解器。",
     "template": "pca-reduction.py",
     "dependencies": [],
     "failure_signals": ["总方差不大于 1e-15", "协方差或 Jacobi 旋转产生非有限值", "Jacobi 整矩阵非对角范数或原协方差残差在扫描预算内未收敛", "第一第二特征值重复或接近导致方向不唯一或不稳定", "单位尺度主导载荷"],
