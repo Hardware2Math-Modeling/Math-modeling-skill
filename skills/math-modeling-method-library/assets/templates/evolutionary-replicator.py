@@ -40,6 +40,8 @@ def solve(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
         fitness = [sum(value * share for value, share in zip(row, shares)) for row in payoff]
         average = sum(share * value for share, value in zip(shares, fitness))
         raw_updated = [share + dt * share * (value - average) for share, value in zip(shares, fitness)]
+        if any(not math.isfinite(value) for value in raw_updated):
+            raise ValueError("replicator step must produce a finite Euler update")
         scale = max(1.0, *(abs(value) for value in raw_updated))
         roundoff = 64.0 * math.ulp(scale)
         if any(value < -roundoff or value > 1.0 + roundoff for value in raw_updated):

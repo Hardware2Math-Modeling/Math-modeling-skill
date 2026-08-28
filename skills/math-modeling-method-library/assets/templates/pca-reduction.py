@@ -39,27 +39,31 @@ def solve(data: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
     total_variance = sum(covariance[index][index] for index in range(columns))
     if total_variance <= 1e-15:
         raise ValueError("PCA is undefined for zero total variance")
-    seed_row = max(
-        covariance,
-        key=lambda row: sum(value * value for value in row),
-    )
-    seed_norm = math.sqrt(sum(value * value for value in seed_row))
-    vector = [value / seed_norm for value in seed_row]
-    for _ in range(iterations):
-        updated = [sum(value * component for value, component in zip(row, vector)) for row in covariance]
-        norm = math.sqrt(sum(value * value for value in updated))
-        if norm <= 1e-15:
-            raise ValueError("PCA power iteration reached a zero direction")
-        updated = [value / norm for value in updated]
-        if max(abs(abs(a) - abs(b)) for a, b in zip(updated, vector)) < 1e-12:
-            vector = updated
-            break
-        vector = updated
+    candidates: list[tuple[float, list[float]]] = []
+    for seed_row in covariance:
+        seed_norm = math.sqrt(sum(value * value for value in seed_row))
+        if seed_norm <= 1e-15:
+            continue
+        candidate = [value / seed_norm for value in seed_row]
+        for _ in range(iterations):
+            updated = [sum(value * component for value, component in zip(row, candidate)) for row in covariance]
+            norm = math.sqrt(sum(value * value for value in updated))
+            if norm <= 1e-15:
+                break
+            updated = [value / norm for value in updated]
+            if max(abs(abs(a) - abs(b)) for a, b in zip(updated, candidate)) < 1e-12:
+                candidate = updated
+                break
+            candidate = updated
+        eigenvalue = sum(candidate[i] * covariance[i][j] * candidate[j] for i in range(columns) for j in range(columns))
+        candidates.append((eigenvalue, candidate))
+    if not candidates:
+        raise ValueError("PCA power iteration reached a zero direction")
+    eigenvalue, vector = max(candidates, key=lambda item: item[0])
     anchor = max(range(columns), key=lambda index: abs(vector[index]))
     if vector[anchor] < 0:
         vector = [-value for value in vector]
     scores = [sum(value * loading for value, loading in zip(row, vector)) for row in centered]
-    eigenvalue = sum(vector[i] * covariance[i][j] * vector[j] for i in range(columns) for j in range(columns))
     return {
         "values": scores,
         "metrics": {"loadings": vector, "explained_variance": eigenvalue, "explained_variance_ratio": eigenvalue / total_variance},

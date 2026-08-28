@@ -320,6 +320,33 @@ class MethodLibraryTests(unittest.TestCase):
         self.assertAlmostEqual(-(2 ** 0.5), result["values"][0])
         self.assertAlmostEqual(2 ** 0.5, result["values"][2])
 
+    def test_pca_initialization_reaches_the_largest_eigenvalue_not_a_subleading_row_space(self) -> None:
+        module = _load_template("pca-reduction")
+        item = next(entry for entry in load_catalog() if entry["id"] == "pca-reduction")
+        root_two = 2 ** 0.5
+        first = [1 / root_two, 0.0, 1 / root_two]
+        second = [0.0, 1.0, 0.0]
+        third = [-1 / root_two, 0.0, 1 / root_two]
+        rows = []
+        for eigenvalue, direction in ((1.0, first), (0.9, second), (0.1, third)):
+            amplitude = (5 * eigenvalue / 2) ** 0.5
+            rows.extend(
+                [
+                    [amplitude * value for value in direction],
+                    [-amplitude * value for value in direction],
+                ]
+            )
+
+        result = module.solve({"matrix": rows, "iterations": 100}, {"seed": 0})
+
+        self.assertAlmostEqual(1.0, result["metrics"]["explained_variance"])
+        self.assertAlmostEqual(0.5, result["metrics"]["explained_variance_ratio"])
+        self.assertAlmostEqual(1 / root_two, result["metrics"]["loadings"][0])
+        self.assertAlmostEqual(1 / root_two, result["metrics"]["loadings"][2])
+        self.assertIn("多起点", item["formula"])
+        self.assertIn("O(np^2+iter*p^3)", item["scale_limit"])
+        self.assertIn("p<=50", item["scale_limit"])
+
     def test_every_direct_solve_rejects_nonfinite_input_even_when_unused(self) -> None:
         fixture_payload = _strict_json(LIBRARY / "assets/fixtures/method-smoke.json")
         fixtures = {fixture["method_id"]: fixture for fixture in fixture_payload["fixtures"]}
@@ -375,6 +402,20 @@ class MethodLibraryTests(unittest.TestCase):
                     "payoff": [[-100, -100], [100, 100]],
                     "initial": [0.5, 0.5],
                     "dt": 0.1,
+                    "steps": 1,
+                },
+                {"seed": 0},
+            )
+
+    def test_replicator_rejects_nonfinite_raw_euler_updates_before_clipping(self) -> None:
+        module = _load_template("evolutionary-replicator")
+
+        with self.assertRaisesRegex(ValueError, "finite Euler update"):
+            module.solve(
+                {
+                    "payoff": [[1e308, 1e308], [-1e308, -1e308]],
+                    "initial": [0.5, 0.5],
+                    "dt": 1e308,
                     "steps": 1,
                 },
                 {"seed": 0},
