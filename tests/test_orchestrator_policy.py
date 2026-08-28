@@ -18,9 +18,14 @@ HANDOFF_FIXTURE = ROOT / "tests/fixtures/handoff-v2.json"
 sys.path.insert(0, str(SCRIPTS))
 
 from handoff_schema import validate_document  # noqa: E402
-from authorization_capability import _install_host_capability  # noqa: E402
+from authorization_capability import (  # noqa: E402
+    AuthorizationCapabilityError,
+    _HOST_REGISTRATION_TOKEN,
+    _install_host_capability,
+)
 from orchestrator_policy import authorization_errors  # noqa: E402
 from paper_production import paper_finalization_sha256  # noqa: E402
+from project_state import create_iteration, load_current  # noqa: E402
 from tests.test_paper_content import valid_content  # noqa: E402
 
 
@@ -296,10 +301,12 @@ OFFICIAL_SOURCE_VERIFIER = FixtureOfficialSourceVerifier()
 HOST_CAPABILITY = _install_host_capability(
     verify_user_event=TRUSTED_USER_EVENT_VERIFIER.verify_user_event,
     verify_official_source=OFFICIAL_SOURCE_VERIFIER.verify_official_source,
+    registration_token=_HOST_REGISTRATION_TOKEN,
 )
 OFFICIAL_ONLY_CAPABILITY = _install_host_capability(
     verify_user_event=lambda **_: None,
     verify_official_source=OFFICIAL_SOURCE_VERIFIER.verify_official_source,
+    registration_token=_HOST_REGISTRATION_TOKEN,
 )
 
 
@@ -440,6 +447,13 @@ def _materialize_authorization_project(
             json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
             encoding="utf-8",
         )
+    gate_report_path = project / "qa/gates.json"
+    gate_report_path.parent.mkdir(parents=True, exist_ok=True)
+    gate_report_path.write_text(
+        json.dumps(evidence["gate_report"], ensure_ascii=False, sort_keys=True, indent=2)
+        + "\n",
+        encoding="utf-8",
+    )
     return evidence
 
 
@@ -695,6 +709,28 @@ class OrchestratorPolicyApiTests(unittest.TestCase):
         )
         self.assertEqual(0, completed.returncode, completed.stderr)
 
+    def test_package_capability_registry_is_shared_with_package_policy(self) -> None:
+        """Catches package-path capabilities being rejected by package policy's registry."""
+
+        package_capability = __import__(
+            "scripts.authorization_capability", fromlist=["_install_host_capability"]
+        )
+        package_policy = __import__(
+            "scripts.orchestrator_policy", fromlist=["authorization_errors"]
+        )
+        self.assertIs(package_capability, sys.modules["authorization_capability"])
+        capability = package_capability._install_host_capability(
+            verify_user_event=TRUSTED_USER_EVENT_VERIFIER.verify_user_event,
+            verify_official_source=OFFICIAL_SOURCE_VERIFIER.verify_official_source,
+            registration_token=package_capability._HOST_REGISTRATION_TOKEN,
+        )
+        errors = package_policy.authorization_errors(
+            "current-rule-claim",
+            {"official_verification": valid_official_verification("rule")},
+            host_capability=capability,
+        )
+        self.assertEqual([], errors)
+
     def test_authorization_policy_exposes_error_evaluator(self) -> None:
         """Catches removal of the executable authorization decision boundary."""
 
@@ -717,6 +753,15 @@ class OrchestratorPolicyApiTests(unittest.TestCase):
                 "current-rule-claim",
                 {"official_verification": valid_official_verification()},
                 official_source_verifier=object(),
+            )
+
+    def test_host_capability_installer_requires_registration_token(self) -> None:
+        """Catches the private installer minting caller-controlled echo capabilities."""
+
+        with self.assertRaises(AuthorizationCapabilityError):
+            _install_host_capability(
+                verify_user_event=lambda **_: None,
+                verify_official_source=lambda **_: True,
             )
 
 
@@ -1390,6 +1435,93 @@ class OrchestratorAuthorizationTests(unittest.TestCase):
                 self.assertTrue(errors)
                 self.assertIn("gate3", " ".join(errors).lower())
 
+    def test_gate_authorization_requires_canonical_disk_gate_report(self) -> None:
+        """Catches supplied gate reports bypassing missing or newer canonical qa/gates.json."""
+
+        missing = valid_authorization_evidence()
+        (Path(missing["preflight"]["project_root"]) / "qa/gates.json").unlink()
+        missing_errors = authorize("paper-writing", missing)
+        self.assertTrue(missing_errors)
+        self.assertIn("canonical", " ".join(missing_errors).lower())
+
+        newer = valid_authorization_evidence()
+        gate_path = Path(newer["preflight"]["project_root"]) / "qa/gates.json"
+        report = json.loads(gate_path.read_text(encoding="utf-8"))
+        report["records"].append(
+            {
+                "schema_version": "2",
+                "gate_id": "gate3",
+                "status": "rejected",
+                "artifact_scope": [],
+                "artifact_hashes": [],
+                "notes": "newer rejection",
+                "rollback_stage": "validation",
+            }
+        )
+        gate_path.write_text(
+            json.dumps(report, ensure_ascii=False, sort_keys=True, indent=2) + "\n",
+            encoding="utf-8",
+        )
+        newer_errors = authorize("paper-writing", newer)
+        self.assertTrue(newer_errors)
+        self.assertIn("canonical", " ".join(newer_errors).lower())
+
+    def test_new_iteration_without_staleness_cannot_reuse_old_downstream_evidence(self) -> None:
+        """Catches create_iteration without mark_stale carrying old Gate 3/validation forward."""
+
+        for action in ("paper-writing", "project-complete"):
+            with self.subTest(action=action):
+                evidence = valid_authorization_evidence()
+                project = Path(evidence["preflight"]["project_root"])
+                version = create_iteration(
+                    project, reason="Q1 source changed", affected_questions=["Q1"]
+                )
+                current = load_current(project)
+                evidence["iteration"] = current
+                handoff = json.loads(
+                    (project / f"iterations/{version}/state/handoff.json").read_text(
+                        encoding="utf-8"
+                    )
+                )
+                dependency = next(
+                    artifact
+                    for artifact in handoff["artifacts"]
+                    if artifact["kind"] == "question-dependency-manifest"
+                )
+                dependency["path"] = f"iterations/{version}/manifests/Q1-dependencies.json"
+                evidence["handoff"] = handoff
+                evidence["question_version_evidence"] = {
+                    "schema_version": "2",
+                    "active_iteration": version,
+                    "questions": [
+                        {
+                            "question_id": "Q1",
+                            "source_iteration": version,
+                            "dependency_manifest": {
+                                "path": dependency["path"],
+                                "sha256": dependency["sha256"],
+                            },
+                            "status": "current",
+                        }
+                    ],
+                }
+                (project / f"iterations/{version}/state/handoff.json").write_text(
+                    json.dumps(handoff, ensure_ascii=False, sort_keys=True, indent=2)
+                    + "\n",
+                    encoding="utf-8",
+                )
+                (project / "current.json").write_text(
+                    json.dumps(current, ensure_ascii=False, sort_keys=True, indent=2)
+                    + "\n",
+                    encoding="utf-8",
+                )
+                if action == "project-complete":
+                    evidence["paper_request"] = valid_paper_request(False)
+                    evidence["official_verification"] = valid_official_verification()
+                errors = authorize(action, evidence)
+                self.assertTrue(errors)
+                self.assertRegex(" ".join(errors).lower(), r"stale|iteration|gate3|validation")
+
     def test_corrupt_append_only_gate_history_blocks_authorization(self) -> None:
         """Catches a valid latest gate hiding a malformed earlier audit record."""
 
@@ -1400,7 +1532,7 @@ class OrchestratorAuthorizationTests(unittest.TestCase):
 
         errors = authorize("paper-writing", evidence)
         self.assertTrue(errors)
-        self.assertIn("gate report record[0]", " ".join(errors).lower())
+        self.assertRegex(" ".join(errors).lower(), r"gate report record\[0\]|canonical")
 
     def test_nonpass_or_stale_validation_blocks_paper_writing(self) -> None:
         """Catches stale, invalidated, or non-pass validation authorizing paper work."""

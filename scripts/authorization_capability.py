@@ -8,8 +8,19 @@ never enter the registry and therefore cannot authorize anything.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import sys
 from typing import Callable
 from weakref import WeakKeyDictionary
+
+
+# Keep direct script and supported ``scripts.*`` imports on one module object.
+# This preserves one capability class, seal, and registry in either import mode.
+_THIS_MODULE = sys.modules.get(__name__)
+if _THIS_MODULE is not None:
+    if __name__ == "authorization_capability":
+        sys.modules.setdefault("scripts.authorization_capability", _THIS_MODULE)
+    elif __name__ == "scripts.authorization_capability":
+        sys.modules.setdefault("authorization_capability", _THIS_MODULE)
 
 
 class AuthorizationCapabilityError(ValueError):
@@ -40,12 +51,14 @@ class _HostBindings:
 
 _CAPABILITY_SEAL = object()
 _HOST_BINDINGS: WeakKeyDictionary[_HostCapability, _HostBindings] = WeakKeyDictionary()
+_HOST_REGISTRATION_TOKEN = object()
 
 
 def _install_host_capability(
     *,
     verify_user_event: UserEventVerifier,
     verify_official_source: OfficialSourceVerifier,
+    registration_token: object | None = None,
 ) -> object:
     """Install host-owned callbacks and return their opaque process-local handle.
 
@@ -53,6 +66,10 @@ def _install_host_capability(
     tests.  It supplies no built-in issuer, receipt, source, or accepting verifier.
     """
 
+    if registration_token is not _HOST_REGISTRATION_TOKEN:
+        raise AuthorizationCapabilityError(
+            "host capability installation requires the embedding-host registration token"
+        )
     if not callable(verify_user_event) or not callable(verify_official_source):
         raise TypeError("host verification callbacks must be callable")
     capability = _HostCapability(_CAPABILITY_SEAL)

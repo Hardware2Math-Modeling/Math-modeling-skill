@@ -16,7 +16,10 @@ from pathlib import Path
 from typing import Sequence
 from uuid import uuid4
 
-from authorization_capability import verify_user_event as verify_host_user_event
+try:
+    from .authorization_capability import verify_user_event as verify_host_user_event
+except ImportError:  # direct script/module fallback
+    from authorization_capability import verify_user_event as verify_host_user_event
 from handoff_schema import (
     GATE_REQUIRED_SCOPE_KINDS,
     GATE_SCOPE_KINDS,

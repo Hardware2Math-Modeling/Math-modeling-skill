@@ -13,10 +13,16 @@ _SCRIPT_DIRECTORY = str(Path(__file__).resolve().parent)
 if _SCRIPT_DIRECTORY not in sys.path:
     sys.path.insert(0, _SCRIPT_DIRECTORY)
 
-from authorization_capability import (
-    verify_official_source as verify_host_official_source,
-    verify_user_event as verify_host_user_event,
-)
+try:
+    from .authorization_capability import (
+        verify_official_source as verify_host_official_source,
+        verify_user_event as verify_host_user_event,
+    )
+except ImportError:  # direct ``python scripts/orchestrator_policy.py`` fallback
+    from authorization_capability import (
+        verify_official_source as verify_host_official_source,
+        verify_user_event as verify_host_user_event,
+    )
 from handoff_schema import (
     GATE_SCOPE_KINDS,
     load_json_strict,
@@ -657,6 +663,36 @@ def _gate_errors(
     if type(records) is not list:
         return [*errors, f"{gate_id} gate report records must be an array"]
 
+    # The report supplied to this API is an input claim.  The project-backed
+    # qa/gates.json is the sole canonical source, so a missing, malformed, or
+    # newer on-disk record must never be bypassed by replaying an older object.
+    canonical_report: dict[str, object] | None = None
+    try:
+        root = ensure_no_symlink_components(Path(project_root), "project_root")
+        gate_path = ensure_no_symlink_components(root / "qa/gates.json", "canonical gate report")
+        if not stat.S_ISREG(gate_path.lstat().st_mode):
+            raise ValueError("canonical gate report must be a regular file")
+        loaded = load_json_strict(gate_path)
+        if type(loaded) is not dict or set(loaded) != {"schema_version", "records"}:
+            raise ValueError("canonical gate report has invalid structure")
+        canonical_records = loaded.get("records")
+        if type(canonical_records) is not list:
+            raise ValueError("canonical gate report records must be an array")
+        canonical_report = loaded
+        if loaded != report:
+            errors.append(
+                f"{gate_id} supplied gate report does not exactly match canonical qa/gates.json"
+            )
+    except (OSError, TypeError, ValueError) as error:
+        errors.append(f"canonical gate report is required: {error}")
+
+    records = (
+        canonical_report.get("records")
+        if canonical_report is not None
+        else records
+    )
+    assert type(records) is list
+
     applicable: list[dict[str, object]] = []
     for index, record in enumerate(records):
         if type(record) is not dict:
@@ -769,6 +805,86 @@ def _validation_errors(
             errors.append("a needs_revision handoff cannot authorize paper work")
     if iteration is not None and iteration.get("status") == "stale":
         errors.append("stale iteration state cannot authorize paper work")
+    return errors
+
+
+def _iteration_freshness_errors(
+    iteration: dict[str, object] | None,
+    project_root: object,
+) -> list[str]:
+    """Require the project-state stale event for every post-v001 iteration.
+
+    ``create_iteration`` snapshots prior evidence and advances the current pointer;
+    without a subsequent ``mark_stale`` event, old validation and gate records would
+    otherwise remain indistinguishable from evidence for the new source version.
+    """
+
+    if iteration is None or iteration.get("active_iteration") == "v001":
+        return []
+    errors: list[str] = []
+    try:
+        root = ensure_no_symlink_components(Path(project_root), "project_root")
+        active = str(iteration.get("active_iteration"))
+        audit_path = ensure_no_symlink_components(
+            root / f"iterations/{active}/state/iteration.json",
+            "active iteration audit",
+        )
+        stale_path = ensure_no_symlink_components(
+            root / "qa/staleness.json", "canonical staleness report"
+        )
+        if not stat.S_ISREG(audit_path.lstat().st_mode):
+            raise ValueError("active iteration audit must be a regular file")
+        if not stat.S_ISREG(stale_path.lstat().st_mode):
+            raise ValueError("canonical staleness report must be a regular file")
+        audit = load_json_strict(audit_path)
+        stale = load_json_strict(stale_path)
+    except (OSError, TypeError, ValueError) as error:
+        return [f"current iteration freshness evidence is required: {error}"]
+    if (
+        type(audit) is not dict
+        or audit.get("schema_version") != "2"
+        or audit.get("iteration") != iteration.get("active_iteration")
+        or type(audit.get("parent")) is not str
+        or type(audit.get("reason")) is not str
+        or not audit.get("reason", "").strip()
+        or type(audit.get("affected_questions")) is not list
+        or not audit.get("affected_questions")
+    ):
+        errors.append("active iteration audit is malformed or does not bind current iteration")
+    if (
+        type(stale) is not dict
+        or stale.get("schema_version") != "2"
+        or stale.get("status") != "stale"
+        or type(stale.get("recorded_at")) is not str
+        or type(stale.get("changed_paths")) is not list
+        or not stale.get("changed_paths")
+        or type(stale.get("invalidated")) is not dict
+        or not stale.get("invalidated")
+    ):
+        errors.append(
+            "canonical staleness report must be a non-empty stale project-state event"
+        )
+    if type(audit) is dict and type(stale) is dict:
+        created_at = audit.get("created_at")
+        recorded_at = stale.get("recorded_at")
+        if (
+            type(created_at) is not str
+            or type(recorded_at) is not str
+            or recorded_at < created_at
+        ):
+            errors.append(
+                "canonical staleness report must be recorded at or after the active iteration"
+            )
+    if type(audit) is dict and type(stale) is dict:
+        affected = audit.get("affected_questions")
+        invalidated = stale.get("invalidated")
+        if type(affected) is list and type(invalidated) is dict:
+            missing = sorted(set(affected) - set(invalidated))
+            if missing:
+                errors.append(
+                    "canonical staleness report must cover every affected question: "
+                    + ", ".join(str(item) for item in missing)
+                )
     return errors
 
 
@@ -965,6 +1081,8 @@ def authorization_errors(
                 errors.append(
                     "canonical project current.json status must be in_progress"
                 )
+    if action in _FORWARD_PROJECT_ACTIONS and iteration is not None:
+        errors.extend(_iteration_freshness_errors(iteration, project_root))
     if action in _FORWARD_PROJECT_ACTIONS and handoff is not None and iteration is not None:
         active_iteration = iteration.get("active_iteration")
         try:

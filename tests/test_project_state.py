@@ -15,7 +15,10 @@ ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
 sys.path.insert(0, str(SCRIPTS))
 
-from authorization_capability import _install_host_capability  # noqa: E402
+from authorization_capability import (  # noqa: E402
+    _HOST_REGISTRATION_TOKEN,
+    _install_host_capability,
+)
 from project_state import (  # noqa: E402
     create_iteration,
     init_project,
@@ -83,6 +86,7 @@ def host_capability(receipt: dict[str, object]) -> object:
     return _install_host_capability(
         verify_user_event=verifier.verify_user_event,
         verify_official_source=lambda **_: False,
+        registration_token=_HOST_REGISTRATION_TOKEN,
     )
 
 
