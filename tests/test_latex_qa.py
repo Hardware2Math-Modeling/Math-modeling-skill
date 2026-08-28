@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -13,6 +14,7 @@ import sys
 sys.path.insert(0, str(SCRIPTS))
 
 from latex_qa import evaluate_page_gate, inspect_pdf  # noqa: E402
+from manifest import sha256_file  # noqa: E402
 
 
 def write_text_pdf(path: Path, pages: int) -> None:
@@ -64,7 +66,12 @@ def write_text_pdf(path: Path, pages: int) -> None:
     path.write_bytes(output)
 
 
-def write_xref_stream_pdf(path: Path) -> None:
+def write_xref_stream_pdf(
+    path: Path,
+    *,
+    free_object: int | None = None,
+    wrong_offset_object: int | None = None,
+) -> None:
     """Write a one-page PDF 1.5 file whose cross-reference is a stream."""
 
     values = [
@@ -86,9 +93,17 @@ def write_xref_stream_pdf(path: Path) -> None:
         output.extend(b"\nendobj\n")
     xref_offset = len(output)
     offsets.append(xref_offset)
-    entries = b"\x00\x00\x00\x00\x00\xff\xff" + b"".join(
-        b"\x01" + offset.to_bytes(4, "big") + b"\x00\x00"
-        for offset in offsets[1:]
+    entry_values = [(0, 0, 65535)] + [
+        (1, offset, 0) for offset in offsets[1:]
+    ]
+    if free_object is not None:
+        entry_values[free_object] = (0, 0, 0)
+    if wrong_offset_object is not None:
+        kind, offset, generation = entry_values[wrong_offset_object]
+        entry_values[wrong_offset_object] = (kind, offset + 1, generation)
+    entries = b"".join(
+        bytes([kind]) + offset.to_bytes(4, "big") + generation.to_bytes(2, "big")
+        for kind, offset, generation in entry_values
     )
     output.extend(
         (
@@ -238,6 +253,78 @@ class LatexQATests(unittest.TestCase):
         self.assertEqual("needs_revision", report["status"])
         self.assertEqual([], report["failed_checks"])
         self.assertEqual(1, report["total_pages"])
+
+    def test_xref_stream_free_or_wrong_object_entries_fail_closed(self) -> None:
+        for mutation in ("free_catalog", "wrong_page_offset"):
+            pdf = self.root / f"{mutation}.pdf"
+            write_xref_stream_pdf(
+                pdf,
+                free_object=1 if mutation == "free_catalog" else None,
+                wrong_offset_object=3 if mutation == "wrong_page_offset" else None,
+            )
+            aux = self.root / f"{mutation}.aux"
+            aux.write_text(
+                "\\newlabel{mm-body-start}{{1}{1}}\n"
+                "\\newlabel{mm-body-end}{{8}{1}}\n",
+                encoding="utf-8",
+            )
+            with self.subTest(mutation=mutation):
+                with patch("latex_qa.shutil.which", return_value=None):
+                    report = inspect_pdf(pdf, aux_path=aux, log_paths=[])
+                self.assertEqual("fail", report["status"])
+                self.assertIn("xref", " ".join(report["failed_checks"]).lower())
+
+    def test_automatic_structure_never_claims_visual_pass(self) -> None:
+        pdf = self.root / "page-numbers-only.pdf"
+        aux = self.root / "page-numbers-only.aux"
+        write_text_pdf(pdf, 25)
+        aux.write_text(
+            "\\newlabel{mm-body-start}{{1}{1}}\n"
+            "\\newlabel{mm-body-end}{{8}{25}}\n",
+            encoding="utf-8",
+        )
+        with patch("latex_qa.shutil.which", return_value=None):
+            report = inspect_pdf(pdf, aux_path=aux, log_paths=[])
+        self.assertEqual("pass", report["status"])
+        self.assertEqual("needs_review", report["visual_qa"]["status"])
+
+    def test_verified_render_review_bound_to_pdf_hash_lifts_visual_status(self) -> None:
+        pdf = self.root / "reviewed.pdf"
+        aux = self.root / "reviewed.aux"
+        render = self.root / "render-contact-sheet.png"
+        review = self.root / "visual-review.json"
+        write_text_pdf(pdf, 25)
+        aux.write_text(
+            "\\newlabel{mm-body-start}{{1}{1}}\n"
+            "\\newlabel{mm-body-end}{{8}{25}}\n",
+            encoding="utf-8",
+        )
+        render.write_bytes(b"controlled render evidence")
+        review.write_text(
+            json.dumps(
+                {
+                    "status": "verified",
+                    "pdf_sha256": sha256_file(pdf),
+                    "page_coverage": {"start": 1, "end": 25, "pages": 25},
+                    "render_evidence": [
+                        {"path": str(render), "sha256": sha256_file(render)}
+                    ],
+                    "reviewer": "fixture-reviewer",
+                },
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        with patch("latex_qa.shutil.which", return_value=None):
+            report = inspect_pdf(
+                pdf,
+                aux_path=aux,
+                log_paths=[],
+                visual_review_path=review,
+            )
+        self.assertEqual("pass", report["visual_qa"]["status"])
+        self.assertEqual(sha256_file(review), report["visual_qa"]["review_sha256"])
 
 
 if __name__ == "__main__":

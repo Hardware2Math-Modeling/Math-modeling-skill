@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -119,6 +120,7 @@ def _pdf_objects(data: bytes) -> tuple[dict[int, tuple[int, bytes]], list[str]]:
     xref_offset = int(eof.group(1))
     classic_xref = False
     xref_stream_dictionary: bytes | None = None
+    xref_entries: dict[int, tuple[int, int, int]] = {}
     if 0 <= xref_offset < len(data) and data[xref_offset:].startswith(b"xref"):
         classic_xref = True
     elif 0 <= xref_offset < len(data):
@@ -176,6 +178,7 @@ def _pdf_objects(data: bytes) -> tuple[dict[int, tuple[int, bytes]], list[str]]:
                                 for width in widths:
                                     fields.append(int.from_bytes(stream[cursor : cursor + width], "big"))
                                     cursor += width
+                                xref_entries[object_id] = (fields[0], fields[1], fields[2])
                                 if object_id == xref_object:
                                     accounted = fields[0] == 1 and fields[1] == xref_offset
                         if not accounted:
@@ -198,6 +201,24 @@ def _pdf_objects(data: bytes) -> tuple[dict[int, tuple[int, bytes]], list[str]]:
         rb"/Root\s+\d+\s+0\s+R\b", xref_stream_dictionary
     ) is None:
         errors.append("PDF xref stream has no catalog root")
+
+    if xref_stream_dictionary is not None and xref_entries:
+        for object_id, (offset, _) in objects.items():
+            entry = xref_entries.get(object_id)
+            if entry is None or entry[0] != 1 or entry[1] != offset:
+                errors.append(
+                    f"PDF xref stream entry for direct object {object_id} is free or has the wrong offset"
+                )
+        root_match = re.search(rb"/Root\s+(\d+)\s+0\s+R\b", xref_stream_dictionary)
+        if root_match is not None:
+            root_id = int(root_match.group(1))
+            root_entry = xref_entries.get(root_id)
+            if root_entry is None or root_entry[0] not in (1, 2):
+                errors.append("PDF xref stream catalog entry is missing or free")
+            elif root_entry[0] == 2:
+                container = objects.get(root_entry[1])
+                if container is None or re.search(rb"/Type\s*/ObjStm\b", container[1]) is None:
+                    errors.append("PDF xref stream catalog object stream is unavailable")
 
     if not errors and classic_xref:
         xref_data = data[xref_offset : eof.start()]
@@ -309,12 +330,95 @@ def _reference_errors(log_paths: Sequence[Path]) -> tuple[list[str], list[dict[s
     return errors, logs
 
 
+def _visual_review(
+    path: Path | None,
+    *,
+    pdf_hash: str,
+    total_pages: int | None,
+) -> tuple[dict[str, object], list[str]]:
+    if path is None:
+        return {
+            "status": "needs_review",
+            "method": "verified_render_review_required",
+            "failed_checks": [],
+        }, []
+    try:
+        safe = _regular_file(path, "visual review")
+
+        def reject_constant(value: str) -> object:
+            raise ValueError(f"non-finite JSON constant: {value}")
+
+        def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
+            result: dict[str, object] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(f"duplicate JSON key: {key}")
+                result[key] = value
+            return result
+
+        payload = json.loads(
+            safe.read_text(encoding="utf-8"),
+            parse_constant=reject_constant,
+            object_pairs_hook=reject_duplicates,
+        )
+        if type(payload) is not dict:
+            raise ValueError("visual review must be a JSON object")
+        required = {
+            "status",
+            "pdf_sha256",
+            "page_coverage",
+            "render_evidence",
+            "reviewer",
+        }
+        if set(payload) != required or payload.get("status") != "verified":
+            raise ValueError("visual review fields/status are not exactly verified")
+        if payload.get("pdf_sha256") != pdf_hash:
+            raise ValueError("visual review PDF hash does not match compiled PDF")
+        coverage = payload.get("page_coverage")
+        expected = {"start": 1, "end": total_pages, "pages": total_pages}
+        if type(coverage) is not dict or coverage != expected:
+            raise ValueError("visual review page coverage must include every compiled page")
+        reviewer = payload.get("reviewer")
+        if type(reviewer) is not str or not reviewer.strip():
+            raise ValueError("visual review reviewer must be non-empty")
+        evidence = payload.get("render_evidence")
+        if type(evidence) is not list or not evidence:
+            raise ValueError("visual review render_evidence must be non-empty")
+        rendered: list[dict[str, str]] = []
+        for index, entry in enumerate(evidence):
+            if type(entry) is not dict or set(entry) != {"path", "sha256"}:
+                raise ValueError(f"visual review render_evidence[{index}] is malformed")
+            render = _regular_file(Path(str(entry["path"])), "visual review render evidence")
+            digest = entry.get("sha256")
+            if digest != sha256_file(render):
+                raise ValueError("visual review render evidence hash is stale")
+            rendered.append({"path": str(render), "sha256": str(digest)})
+    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
+        message = f"visual review is invalid: {error}"
+        return {
+            "status": "fail",
+            "method": "verified_render_review_required",
+            "failed_checks": [message],
+        }, [message]
+    return {
+        "status": "pass",
+        "method": "verified_render_review",
+        "review_path": str(safe),
+        "review_sha256": sha256_file(safe),
+        "reviewer": reviewer.strip(),
+        "page_coverage": coverage,
+        "render_evidence": rendered,
+        "failed_checks": [],
+    }, []
+
+
 def inspect_pdf(
     pdf_path: Path,
     *,
     aux_path: Path | None,
     log_paths: Sequence[Path],
     pdfinfo_path: Path | None = None,
+    visual_review_path: Path | None = None,
 ) -> dict[str, object]:
     """Inspect a real compiled PDF and derive its body range from aux labels."""
 
@@ -360,6 +464,13 @@ def inspect_pdf(
             "compiled PDF contains empty or broken pages: "
             + ", ".join(str(page) for page in empty_pages)
         )
+
+    visual_qa, visual_review_errors = _visual_review(
+        visual_review_path,
+        pdf_hash=sha256_file(pdf),
+        total_pages=total_pages,
+    )
+    failed.extend(visual_review_errors)
 
     visual_errors = [
         *structure_errors,
@@ -412,17 +523,15 @@ def inspect_pdf(
         "failed_checks": failed,
         "actions": page_gate["actions"] if page_gate is not None else [],
         "empty_pages": empty_pages,
-        "visual_qa": {
-            "status": (
-                "fail"
-                if visual_errors
-                else "pass"
-                if fallback_pages is not None
-                else "needs_review"
-            ),
-            "method": "compiled_page_structure_and_nonempty_content_streams",
-            "failed_checks": visual_errors,
-        },
+        "visual_qa": (
+            {
+                "status": "fail",
+                "method": "compiled_structure_failed",
+                "failed_checks": visual_errors,
+            }
+            if visual_errors
+            else visual_qa
+        ),
         "logs": logs,
         "compiled_pdf_authoritative": True,
         "no_padding": True,

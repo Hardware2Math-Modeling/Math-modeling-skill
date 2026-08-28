@@ -134,6 +134,62 @@ def _write_new_json(path: Path, payload: object) -> None:
                 pass
 
 
+def _mkdir_new(path: Path, label: str) -> Path:
+    target = _absolute(path, label)
+    _directory(target.parent, f"{label} parent")
+    try:
+        os.mkdir(target)
+    except FileExistsError as error:
+        raise FileExistsError(f"{label} already exists: {target}") from error
+    return _directory(target, label)
+
+
+def _write_new_bytes(path: Path, data: bytes, label: str) -> None:
+    target = _absolute(path, label)
+    _directory(target.parent, f"{label} parent")
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor: int | None = None
+    try:
+        descriptor = os.open(target, flags, 0o600)
+        view = memoryview(data)
+        while view:
+            written = os.write(descriptor, view)
+            if written <= 0:
+                raise OSError("short write while publishing immutable artifact")
+            view = view[written:]
+        os.fsync(descriptor)
+    except FileExistsError as error:
+        raise FileExistsError(f"{label} already exists: {target}") from error
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _copy_new_file(source: Path, destination: Path, label: str) -> None:
+    safe_source = _regular_file(source, f"{label} source")
+    try:
+        content = safe_source.read_bytes()
+    except OSError as error:
+        raise ValueError(f"{label} source cannot be read: {safe_source}") from error
+    _write_new_bytes(destination, content, label)
+
+
+def _ensure_subdirectory(root: Path, relative: Path, label: str) -> Path:
+    current = root
+    for part in relative.parts:
+        current = current / part
+        try:
+            os.mkdir(current)
+        except FileExistsError:
+            pass
+        safe = _directory(current, label)
+        if not safe.is_relative_to(root):
+            raise ValueError(f"{label} escapes destination root")
+    return current
+
+
 def _template_files(path: Path, label: str) -> tuple[Path, list[Path], str]:
     safe = _absolute(path, label)
     try:
@@ -191,51 +247,87 @@ def select_template(
     user_template: Path | None,
     fallback_dir: Path,
     official_template: Path | None = None,
+    *,
+    locally_verified_template: Path | None = None,
 ) -> dict[str, object]:
     """Choose and hash a template without copying or mutating any destination."""
 
-    selected: Path
-    status: str
-    eligible: bool
-    selected_role: str
-    if user_template is not None and Path(user_template).exists():
-        selected = Path(user_template)
-        status = "user_provided"
-        eligible = True
-        selected_role = "user"
-    elif official_template is not None and Path(official_template).exists():
-        selected = Path(official_template)
-        status = "official_unverified"
-        eligible = False
-        selected_role = "official"
-    else:
-        selected = Path(fallback_dir)
+    fallback_root, fallback_files, _ = _template_files(Path(fallback_dir), "fallback template")
+    fallback_hash = _tree_hash(fallback_root, fallback_files)
+
+    def inspected(
+        candidate: Path,
+        *,
+        role: str,
+        require_verified: bool,
+    ) -> tuple[Path, Path, list[Path], str, dict[str, object], str, bool] | None:
+        try:
+            root, files, source_kind = _template_files(candidate, f"{role} template")
+            metadata = _template_metadata(root, files)
+            digest = _tree_hash(root, files)
+        except ValueError:
+            if role == "user":
+                raise
+            return None
+        if digest == fallback_hash:
+            return candidate, root, files, source_kind, metadata, digest, False
+        if require_verified:
+            required = ("source_url", "license", "verification_date", "sha256")
+            verified = (
+                metadata.get("status") == "verified"
+                and all(
+                    type(metadata.get(field)) is str
+                    and bool(str(metadata[field]).strip())
+                    for field in required
+                )
+                and _HASH_RE.fullmatch(str(metadata.get("sha256"))) is not None
+            )
+            if not verified:
+                return None
+        return candidate, root, files, source_kind, metadata, digest, True
+
+    choice = None
+    selected_role = "fallback"
+    candidates = (
+        (user_template, "user", False),
+        (official_template, "explicit_official", True),
+        (locally_verified_template, "locally_verified_official", True),
+    )
+    for candidate, role, require_verified in candidates:
+        if candidate is None or not Path(candidate).exists():
+            continue
+        choice = inspected(Path(candidate), role=role, require_verified=require_verified)
+        if choice is not None:
+            selected_role = role
+            break
+    if choice is None:
+        choice = inspected(Path(fallback_dir), role="fallback", require_verified=False)
+        assert choice is not None
+        selected_role = "fallback"
+
+    selected, root, files, source_kind, metadata, selected_hash, distinct = choice
+    if not distinct or selected_role == "fallback":
         status = "fallback_non_submission"
         eligible = False
         selected_role = "fallback"
-
-    root, files, source_kind = _template_files(selected, "selected template")
-    metadata = _template_metadata(root, files)
-    if selected_role == "official":
-        required = ("source_url", "license", "verification_date")
-        verified = metadata.get("status") == "verified" and all(
-            type(metadata.get(field)) is str and bool(str(metadata[field]).strip())
-            for field in required
-        )
-        if verified:
-            status = "official_verified"
-            eligible = True
+    elif selected_role == "user":
+        status = "user_provided"
+        eligible = True
+    else:
+        status = "official_verified"
+        eligible = True
     main_entry = _template_entry(root, files, metadata)
     engine = metadata.get("engine", "xelatex")
-    if type(engine) is not str or not engine.strip():
-        raise ValueError("template engine metadata must be a non-empty string")
+    if engine not in ("xelatex", "tectonic"):
+        raise ValueError("template engine metadata must be exactly xelatex or tectonic")
 
     source = _absolute(selected, "selected template")
     return {
         "template_status": status,
         "source": str(source),
+        "selection_tier": selected_role,
         "source_kind": source_kind,
-        "sha256": _tree_hash(root, files),
+        "sha256": selected_hash,
         "files": [
             {
                 "path": relative.as_posix(),
@@ -352,12 +444,27 @@ def _frozen_content(path: Path, iteration_root: Path) -> tuple[dict[str, object]
 def _environment(
     path: Path,
     project: Path,
+    handoff: dict[str, object],
     requested_compiler: Path | None,
 ) -> tuple[dict[str, object], list[dict[str, object]], str]:
     safe = _regular_file(path, "environment manifest")
     if not safe.is_relative_to(project):
         raise ValueError("environment manifest must belong to the current project")
     report = _strict_json(safe, "environment manifest")
+    environment_hash = sha256_file(safe)
+    artifacts = handoff.get("artifacts")
+    if type(artifacts) is not list:
+        raise ValueError("current handoff must register environment evidence")
+    expected_path = safe.relative_to(project).as_posix()
+    registrations = [
+        artifact
+        for artifact in artifacts
+        if type(artifact) is dict
+        and artifact.get("path") == expected_path
+        and artifact.get("kind") in ("environment", "preflight")
+    ]
+    if len(registrations) != 1 or registrations[0].get("sha256") != environment_hash:
+        raise ValueError("environment manifest is not current registered handoff evidence")
     if report.get("project_root") != str(project):
         raise ValueError("environment manifest project_root does not match the current project")
     latex = report.get("latex")
@@ -380,6 +487,13 @@ def _environment(
         executable = _regular_file(Path(raw_path), f"environment LaTeX tool {name}")
         if not os.access(executable, os.X_OK):
             raise ValueError(f"environment LaTeX tool {name} is not executable")
+        diagnosed_hash = tool.get("sha256")
+        if (
+            type(diagnosed_hash) is not str
+            or _HASH_RE.fullmatch(diagnosed_hash) is None
+            or sha256_file(executable) != diagnosed_hash
+        ):
+            raise ValueError(f"environment LaTeX tool {name} hash no longer matches diagnosis")
         normalized = dict(tool)
         normalized["path"] = str(executable)
         available[str(name)] = normalized
@@ -395,14 +509,14 @@ def _environment(
         if not matches:
             raise ValueError("explicit compiler does not match current preflight evidence")
         ordered = matches
-    return report, ordered, sha256_file(safe)
+    return report, ordered, environment_hash
 
 
 def _copy_selected_template(selection: dict[str, object], destination: Path) -> None:
     source = _absolute(Path(str(selection["source"])), "selected template source")
     source_kind = selection["source_kind"]
     root = source.parent if source_kind == "file" else source
-    destination.mkdir()
+    _mkdir_new(destination, "copied template root")
     files = selection["files"]
     assert type(files) is list
     for entry in files:
@@ -412,8 +526,8 @@ def _copy_selected_template(selection: dict[str, object], destination: Path) -> 
         if sha256_file(source_file) != entry["sha256"]:
             raise ValueError(f"selected template changed before copy: {relative.as_posix()}")
         target = destination / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source_file, target, follow_symlinks=False)
+        _ensure_subdirectory(destination, relative.parent, "copied template directory")
+        _copy_new_file(source_file, target, "copied template file")
     copied = [Path(str(entry["path"])) for entry in files]
     if _tree_hash(destination, copied) != selection["sha256"]:
         raise ValueError("copied template tree hash does not match the selected source")
@@ -437,12 +551,25 @@ def _frontmatter(content: dict[str, object]) -> str:
             )
         )
     keywords = "，".join(str(item) for item in content["keywords"])
-    return (
+    rendered = (
         "\\begin{abstract}\n"
         + "\n\n\\par\n".join(_latex_text(item) for item in paragraphs)
         + "\n\\end{abstract}\n"
         + f"\\noindent\\textbf{{关键词：}}{keywords}\n"
     )
+    english = content.get("english_abstract")
+    if english is not None:
+        if type(english) is not dict:
+            raise ValueError("authorized English abstract must be an object")
+        english_keywords = ", ".join(str(item) for item in english["keywords"])
+        rendered += (
+            "\\section*{English Abstract}\n"
+            + _latex_text(english["text"])
+            + "\n\\noindent\\textbf{Keywords:} "
+            + english_keywords
+            + "\n"
+        )
+    return rendered
 
 
 def _body(content: dict[str, object]) -> str:
@@ -452,6 +579,8 @@ def _body(content: dict[str, object]) -> str:
     for number in range(1, 9):
         section = sections[str(number)]
         assert type(section) is dict
+        if number == 1:
+            lines.append("\\phantomsection\\label{mm-body-start}")
         lines.append(f"\\section{{{section['title']}}}")
         if number == 1:
             for subsection in section["subsections"].values():
@@ -474,7 +603,35 @@ def _body(content: dict[str, object]) -> str:
                     lines.append(_latex_text(subsection["content"]))
         else:
             lines.append(_latex_text(section["content"]))
+    lines.append("\\phantomsection\\label{mm-body-end}")
     return "\n\n".join(lines) + "\n"
+
+
+def _validate_template_integration(template: Path, main_entry: str) -> None:
+    main = _regular_file(template / main_entry, "template main entry")
+    try:
+        text = main.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise ValueError("template main entry must be readable UTF-8") from error
+    uncommented = "\n".join(line.split("%", 1)[0] for line in text.splitlines())
+    slots = (
+        "paper-frontmatter.tex",
+        "paper-body.tex",
+        "paper-appendices.tex",
+    )
+    positions: list[int] = []
+    for slot in slots:
+        pattern = re.compile(r"\\input\s*\{\s*" + re.escape(slot) + r"\s*\}")
+        matches = list(pattern.finditer(uncommented))
+        if len(matches) != 1:
+            raise ValueError(
+                f"template conflict: main entry must consume {slot} exactly once"
+            )
+        positions.append(matches[0].start())
+    if positions != sorted(positions):
+        raise ValueError(
+            "template conflict: generated input slots must be frontmatter, body, appendix"
+        )
 
 
 def _appendices(content: dict[str, object]) -> str:
@@ -518,11 +675,40 @@ def _write_assembly(template: Path, content: dict[str, object]) -> list[dict[str
     entries: list[dict[str, str]] = []
     for name, value in rendered.items():
         path = template / name
-        if path.exists() or path.is_symlink():
-            raise FileExistsError(f"template reserves generated assembly path: {path}")
-        path.write_text(value, encoding="utf-8", newline="\n")
+        _write_new_bytes(path, value.encode("utf-8"), "generated assembly file")
         entries.append({"path": name, "sha256": sha256_file(path)})
     return entries
+
+
+def _template_hashes(
+    template: Path,
+    selection: dict[str, object],
+    assembly: Sequence[dict[str, str]],
+) -> dict[str, str]:
+    expected: dict[str, str] = {}
+    selected_files = selection.get("files")
+    if type(selected_files) is not list:
+        raise ValueError("selected template file manifest is invalid")
+    for entry in [*selected_files, *assembly]:
+        if type(entry) is not dict:
+            raise ValueError("template file manifest entry is invalid")
+        relative = safe_relative_path(entry.get("path"), "template manifest path")
+        digest = entry.get("sha256")
+        if type(digest) is not str or _HASH_RE.fullmatch(digest) is None:
+            raise ValueError("template manifest hash is invalid")
+        if relative.as_posix() in expected:
+            raise ValueError(f"duplicate template manifest path: {relative.as_posix()}")
+        expected[relative.as_posix()] = digest
+    observed_files = relative_regular_files(template)
+    if {path.as_posix() for path in observed_files} != set(expected):
+        raise ValueError("copied/assembled template tree has unexpected or missing files")
+    observed = {
+        relative.as_posix(): sha256_file(template / relative)
+        for relative in observed_files
+    }
+    if observed != expected:
+        raise ValueError("copied/assembled template tree hash verification failed")
+    return expected
 
 
 def _command(tool: dict[str, object], main: Path, output: Path) -> list[str]:
@@ -553,6 +739,23 @@ def _command(tool: dict[str, object], main: Path, output: Path) -> list[str]:
     raise ValueError(f"unsupported diagnosed compiler: {name}")
 
 
+def _engine_tools(
+    tools: Sequence[dict[str, object]], engine: object
+) -> list[dict[str, object]]:
+    compatible = {
+        "xelatex": {"latexmk", "xelatex"},
+        "tectonic": {"tectonic"},
+    }
+    if engine not in compatible:
+        raise ValueError("template engine metadata must be exactly xelatex or tectonic")
+    selected = [tool for tool in tools if tool.get("name") in compatible[str(engine)]]
+    if not selected:
+        raise ValueError(
+            f"no diagnosed compiler is compatible with template engine {engine}"
+        )
+    return selected
+
+
 def _project_relative(project: Path, path: Path) -> str:
     safe = _absolute(path, "paper artifact")
     if not safe.is_relative_to(project):
@@ -577,65 +780,130 @@ def _attempt_compilation(
         attempt_build = build / f"attempt-{index:02d}"
         attempt_build.mkdir()
         command = _command(tool, template / main_entry, attempt_build)
-        log_path = logs / f"attempt-{index:02d}-{tool['name']}.log"
-        try:
-            completed = subprocess.run(
-                command,
-                cwd=template,
-                check=False,
-                shell=False,
-                capture_output=True,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-                timeout=_COMPILER_TIMEOUT_SECONDS,
-            )
-            exit_code: int | None = completed.returncode
-            stdout = completed.stdout
-            stderr = completed.stderr
-            execution_error = None
-        except (OSError, subprocess.TimeoutExpired) as error:
-            exit_code = None
-            stdout = getattr(error, "stdout", "") or ""
-            stderr = getattr(error, "stderr", "") or ""
-            execution_error = str(error)
-        log_path.write_text(
-            json.dumps({"command": command}, ensure_ascii=False, allow_nan=False)
-            + "\n\n[stdout]\n"
-            + str(stdout)
-            + "\n[stderr]\n"
-            + str(stderr)
-            + (f"\n[execution_error]\n{execution_error}\n" if execution_error else ""),
-            encoding="utf-8",
-        )
-        all_logs.append(log_path)
         stem = Path(main_entry).stem
         produced_pdf = attempt_build / f"{stem}.pdf"
         produced_aux = attempt_build / f"{stem}.aux"
+        passes: list[dict[str, object]] = []
+        previous_aux_hash: str | None = None
+        converged = tool["name"] != "xelatex"
         candidate_error: str | None = None
         candidate_is_regular = False
-        try:
-            candidate_mode = produced_pdf.lstat().st_mode
-        except FileNotFoundError:
-            pass
-        except OSError as error:
-            candidate_error = f"compiler PDF cannot be inspected: {error}"
-        else:
-            if stat.S_ISLNK(candidate_mode):
-                candidate_error = "compiler PDF must not be a symlink"
-            elif not stat.S_ISREG(candidate_mode):
-                candidate_error = "compiler PDF must be a regular file"
+        max_passes = 3 if tool["name"] == "xelatex" else 1
+
+        for pass_number in range(1, max_passes + 1):
+            log_path = logs / (
+                f"attempt-{index:02d}-{tool['name']}-pass-{pass_number:02d}.log"
+            )
+            try:
+                completed = subprocess.run(
+                    command,
+                    cwd=template,
+                    check=False,
+                    shell=False,
+                    capture_output=True,
+                    text=True,
+                    encoding="utf-8",
+                    errors="replace",
+                    timeout=_COMPILER_TIMEOUT_SECONDS,
+                )
+                exit_code: int | None = completed.returncode
+                stdout = completed.stdout
+                stderr = completed.stderr
+                execution_error = None
+            except (OSError, subprocess.TimeoutExpired) as error:
+                exit_code = None
+                stdout = getattr(error, "stdout", "") or ""
+                stderr = getattr(error, "stderr", "") or ""
+                execution_error = str(error)
+            process_log = (
+                json.dumps({"command": command}, ensure_ascii=False, allow_nan=False)
+                + "\n\n[stdout]\n"
+                + str(stdout)
+                + "\n[stderr]\n"
+                + str(stderr)
+                + (
+                    f"\n[execution_error]\n{execution_error}\n"
+                    if execution_error
+                    else ""
+                )
+            )
+            _write_new_bytes(
+                log_path,
+                process_log.encode("utf-8"),
+                "compiler process log",
+            )
+            all_logs.append(log_path)
+
+            pass_record: dict[str, object] = {
+                "pass": pass_number,
+                "command": command,
+                "exit_code": exit_code,
+                "log_path": _project_relative(project, log_path),
+                "log_sha256": sha256_file(log_path),
+            }
+            build_log = attempt_build / f"{stem}.log"
+            if build_log.is_file() and not build_log.is_symlink():
+                build_log_snapshot = logs / (
+                    f"attempt-{index:02d}-{tool['name']}-pass-{pass_number:02d}-"
+                    f"{stem}.log"
+                )
+                _copy_new_file(build_log, build_log_snapshot, "compiler build log snapshot")
+                all_logs.append(build_log_snapshot)
+                pass_record["build_log_path"] = _project_relative(
+                    project, build_log_snapshot
+                )
+                pass_record["build_log_sha256"] = sha256_file(build_log_snapshot)
+
+            candidate_error = None
+            candidate_is_regular = False
+            try:
+                candidate_mode = produced_pdf.lstat().st_mode
+            except FileNotFoundError:
+                pass
+            except OSError as error:
+                candidate_error = f"compiler PDF cannot be inspected: {error}"
             else:
-                candidate_is_regular = True
+                if stat.S_ISLNK(candidate_mode):
+                    candidate_error = "compiler PDF must not be a symlink"
+                elif not stat.S_ISREG(candidate_mode):
+                    candidate_error = "compiler PDF must be a regular file"
+                else:
+                    candidate_is_regular = True
+            pass_record["candidate_error"] = candidate_error
+
+            aux_hash: str | None = None
+            if produced_aux.is_file() and not produced_aux.is_symlink():
+                aux_hash = sha256_file(produced_aux)
+                pass_record["aux_sha256"] = aux_hash
+            passes.append(pass_record)
+
+            if exit_code != 0 or not candidate_is_regular:
+                break
+            if tool["name"] != "xelatex":
+                break
+            if pass_number >= 2 and aux_hash is not None and aux_hash == previous_aux_hash:
+                converged = True
+                break
+            previous_aux_hash = aux_hash
+
+        final_pass = passes[-1]
+        exit_code = final_pass["exit_code"]
+        if (
+            tool["name"] == "xelatex"
+            and exit_code == 0
+            and candidate_is_regular
+            and not converged
+        ):
+            candidate_error = "direct XeLaTeX auxiliary files did not converge after 3 passes"
         attempt = {
             "tool": tool["name"],
             "path": tool["path"],
             "compiler_sha256": sha256_file(Path(str(tool["path"]))),
             "version": tool.get("version"),
-            "command": command,
+            "command": final_pass["command"],
             "exit_code": exit_code,
-            "log_path": _project_relative(project, log_path),
-            "log_sha256": sha256_file(log_path),
+            "log_path": final_pass["log_path"],
+            "log_sha256": final_pass["log_sha256"],
             "candidate_pdf": (
                 _project_relative(project, produced_pdf) if candidate_is_regular else None
             ),
@@ -643,16 +911,19 @@ def _attempt_compilation(
                 sha256_file(produced_pdf) if candidate_is_regular else None
             ),
             "candidate_error": candidate_error,
+            "passes": passes,
         }
-        build_log = attempt_build / f"{stem}.log"
-        if build_log.is_file() and not build_log.is_symlink():
-            all_logs.append(build_log)
-            attempt["build_log_path"] = _project_relative(project, build_log)
-            attempt["build_log_sha256"] = sha256_file(build_log)
+        if final_pass.get("build_log_path") is not None:
+            attempt["build_log_path"] = final_pass["build_log_path"]
+            attempt["build_log_sha256"] = final_pass["build_log_sha256"]
         attempts.append(attempt)
-        if exit_code == 0 and candidate_is_regular:
+        if exit_code == 0 and candidate_is_regular and converged:
             candidate = produced_pdf
-            aux = produced_aux if produced_aux.is_file() else None
+            aux = (
+                produced_aux
+                if produced_aux.is_file() and not produced_aux.is_symlink()
+                else None
+            )
             break
     return attempts, candidate, aux, all_logs
 
@@ -664,6 +935,10 @@ def produce_paper(
     environment_manifest_path: Path,
     template_path: Path | None = None,
     compiler: Path | None = None,
+    *,
+    official_template: Path | None = None,
+    locally_verified_template: Path | None = None,
+    visual_review_path: Path | None = None,
 ) -> dict[str, object]:
     """Produce one immutable paper attempt from current confirmed evidence."""
 
@@ -680,28 +955,39 @@ def produce_paper(
         raise ValueError("current project state is stale")
     iteration_root = _directory(project / "iterations" / iteration, "active iteration")
     paper = _directory(iteration_root / "paper", "active paper directory")
-    _current_validation(iteration_root)
+    handoff = _current_validation(iteration_root)
     _staleness_check(project)
     content, content_hash = _frozen_content(Path(content_path), iteration_root)
     _, tools, environment_hash = _environment(
         Path(environment_manifest_path),
         project,
+        handoff,
         Path(compiler) if compiler is not None else None,
     )
+    visual_review: Path | None = None
+    if visual_review_path is not None:
+        visual_review = _regular_file(Path(visual_review_path), "visual review evidence")
+        if not visual_review.is_relative_to(project):
+            raise ValueError("visual review evidence must belong to the current project")
     _preflight_output_paths(paper)
 
     fallback = _directory(_BUILTIN_FALLBACK, "built-in fallback template")
     selection = select_template(
         user_template=Path(template_path) if template_path is not None else None,
         fallback_dir=fallback,
+        official_template=official_template,
+        locally_verified_template=locally_verified_template,
     )
+    tools = _engine_tools(tools, selection["engine"])
     template = paper / "template"
     build = paper / "build"
     logs = paper / "logs"
     _copy_selected_template(selection, template)
+    _validate_template_integration(template, str(selection["main_entry"]))
     assembly = _write_assembly(template, content)
-    build.mkdir()
-    logs.mkdir()
+    template_hashes = _template_hashes(template, selection, assembly)
+    _mkdir_new(build, "paper build directory")
+    _mkdir_new(logs, "paper logs directory")
 
     attempts, candidate, aux, all_logs = _attempt_compilation(
         project=project,
@@ -721,6 +1007,7 @@ def produce_paper(
         "template": {
             **selection,
             "copied_root": _project_relative(project, template),
+            "assembled_hashes": template_hashes,
         },
         "template_status": selection["template_status"],
         "content": {
@@ -744,6 +1031,23 @@ def produce_paper(
         "compiler": {"attempts": attempts},
         "submission_ready": False,
     }
+
+    integrity_error: str | None = None
+    try:
+        if _template_hashes(template, selection, assembly) != template_hashes:
+            integrity_error = "template integrity changed during compilation"
+    except ValueError as error:
+        integrity_error = f"template integrity changed during compilation: {error}"
+    if integrity_error is not None:
+        report = {
+            **common,
+            "status": "fail",
+            "failed_checks": [integrity_error],
+            "pdf": None,
+            "page_qa": None,
+        }
+        _write_new_json(manifest_path, report)
+        return report
 
     successful_exit = bool(attempts and attempts[-1]["exit_code"] == 0)
     if candidate is None:
@@ -776,7 +1080,12 @@ def produce_paper(
         for path in all_logs
         if _project_relative(project, path) in final_log_paths
     ]
-    page_qa = inspect_pdf(candidate, aux_path=aux, log_paths=final_log)
+    page_qa = inspect_pdf(
+        candidate,
+        aux_path=aux,
+        log_paths=final_log,
+        visual_review_path=visual_review,
+    )
     pdf_record = {
         "path": _project_relative(project, candidate),
         "sha256": sha256_file(candidate),
@@ -784,9 +1093,7 @@ def produce_paper(
     }
     if page_qa["status"] in ("pass", "needs_revision"):
         published = paper / "paper.pdf"
-        if published.exists() or published.is_symlink():
-            raise FileExistsError(f"paper PDF already exists: {published}")
-        shutil.copyfile(candidate, published, follow_symlinks=False)
+        _copy_new_file(candidate, published, "published paper PDF")
         pdf_record = {
             "path": _project_relative(project, published),
             "sha256": sha256_file(published),
