@@ -99,6 +99,18 @@ next:
 - Every stage result states what was completed in `result.details`, where its evidence lives in `artifacts` or `result.evidence`, and what the next stage still requires through `next.rationale` and `next.alternatives`.
 - Preserve equations, variables, units, provenance, assumptions, accepted and rejected models, warnings, confidence, and validation evidence even when a stage is revised.
 
+## Authoritative authorization evaluator
+
+`workflow.json` transitions and `guards` are a compact routing index and explicitly set `workflow_guards_exhaustive: false`. They never authorize an action by themselves. `scripts/orchestrator_policy.py:authorization_errors` is the machine-readable authority over the parsed records for its supported actions:
+
+- model construction and solving require current preflight/initialization evidence plus the exact applicable confirmed gate;
+- paper writing additionally requires current passing validation with no invalidated inputs;
+- paper production additionally requires complete frozen content and a passing conflict-free template check;
+- accepting the paper page gate additionally requires the exact passing page-gate evaluator record; project completion remains subject to every later production/finalization check;
+- external-data download requires the strict external-data approval record.
+
+The evaluator runtime-validates the handoff, current iteration, initialization, gate provenance, and approval records; binds the diagnosed Python path to initialization; binds gate hashes to current handoff artifacts; and recomputes the page decision from its recorded counts. Any returned error blocks the action. Callers must not treat an omitted workflow JSON boolean, `current.json` status, or a stage recommendation as substitute authorization.
+
 ## Project iterations and staleness
 
 `current.json` is a strict-v2 iteration pointer, not the handoff and not gate evidence. `question_sources` may deliberately mix `vNNN` versions:
@@ -117,9 +129,26 @@ next:
 
 An input, code, parameter, or method change affecting a question creates a new immutable iteration before further work. Update only that question's source version. Mark its dependent run, figure, validation, and paper evidence stale before rerouting; preserve unaffected `question_sources` and all older evidence. A pointer status never substitutes for current artifact hashes or a gate record.
 
+## Official rule and template verification
+
+The CUMCM pack's empty `official_sources` is non-authorizing. A current-rule, current-template, compliance, or submission-readiness claim requires a separately materialized record that runtime-validates against `references/schemas/official-verification.schema.json`. Call the authoritative policy as `authorization_errors("current-rule-claim", evidence)` or `authorization_errors("submission-readiness", evidence)` with the record at `evidence.official_verification`; any returned error blocks the claim. It binds CUMCM and the rule/template type to an absolute HTTP(S) official URL, a real UTC verification time, and the lowercase SHA-256 of the retrieved content. A local filename, free-form source, search summary, or missing/malformed field pauses the claim. The example URL and values below demonstrate shape only; they do not identify or verify a real official source.
+
+### Official verification record
+
+```json
+{
+  "schema_version": "2",
+  "competition": "CUMCM",
+  "source_type": "rule",
+  "source_url": "https://example.invalid/shape-only/rules.pdf",
+  "verified_at": "2026-08-27T00:00:00Z",
+  "content_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+}
+```
+
 ## Confirmation gate records
 
-`qa/gates.json` preserves an append-only record history. For a gate to authorize a route, use the latest applicable record and runtime-validate it with `references/schemas/gate.schema.json`. A confirmed record has exactly the shape below: schema version, gate id/status, confirmer, real UTC confirmation time, at least one current artifact SHA-256, notes, and rollback field. The values below demonstrate shape only and never assert a real confirmation.
+`qa/gates.json` preserves an append-only record history. For a gate to authorize a route, use the latest applicable record and runtime-validate it with `references/schemas/gate.schema.json`. A confirmed record has exactly the shape below: schema version, gate id/status, confirmer, real UTC confirmation time, at least one current artifact SHA-256, notes, rollback field, and an explicit user confirmation provenance record that runtime-validates against `references/schemas/gate-confirmation.schema.json`. The provenance has `actor_type: user`, `confirmation_method: explicit`, and hashes exactly matching the gate; it must be captured from direct user confirmation, never inferred or supplied by stage/model output. The values below demonstrate shape only and never assert a real confirmation.
 
 ### gate1 confirmed record
 
@@ -131,6 +160,14 @@ An input, code, parameter, or method change affecting a question creates a new i
   "confirmed_by": "example-reviewer",
   "confirmed_at": "2000-01-01T00:00:00Z",
   "artifact_hashes": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
+  "confirmation": {
+    "schema_version": "2",
+    "actor_type": "user",
+    "confirmation_method": "explicit",
+    "confirmed_by": "example-reviewer",
+    "confirmed_at": "2000-01-01T00:00:00Z",
+    "artifact_hashes": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+  },
   "notes": "Shape-only example for problem and assumption evidence.",
   "rollback_stage": null
 }
@@ -146,6 +183,14 @@ An input, code, parameter, or method change affecting a question creates a new i
   "confirmed_by": "example-reviewer",
   "confirmed_at": "2000-01-01T00:00:00Z",
   "artifact_hashes": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
+  "confirmation": {
+    "schema_version": "2",
+    "actor_type": "user",
+    "confirmation_method": "explicit",
+    "confirmed_by": "example-reviewer",
+    "confirmed_at": "2000-01-01T00:00:00Z",
+    "artifact_hashes": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+  },
   "notes": "Shape-only example for model, baseline, and validation-plan evidence.",
   "rollback_stage": null
 }
@@ -161,16 +206,24 @@ An input, code, parameter, or method change affecting a question creates a new i
   "confirmed_by": "example-reviewer",
   "confirmed_at": "2000-01-01T00:00:00Z",
   "artifact_hashes": ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+  "confirmation": {
+    "schema_version": "2",
+    "actor_type": "user",
+    "confirmation_method": "explicit",
+    "confirmed_by": "example-reviewer",
+    "confirmed_at": "2000-01-01T00:00:00Z",
+    "artifact_hashes": ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]
+  },
   "notes": "Shape-only example for current validation, result, and figure evidence.",
   "rollback_stage": null
 }
 ```
 
-Oral permission and `current.json.gates` alone do not confirm a gate. Gate 1 follows problem/assumption review; Gate 2 follows model, baseline, parameter-source, and validation-plan review; Gate 3 follows current validation, result, and figure review. Pending, rejected, stale, malformed, hashless, or superseded records do not authorize the next stage.
+Oral permission, stage/model self-attestation, an arbitrary `confirmed_by`, and `current.json.gates` alone do not confirm a gate. `record_gate` requires a separately materialized explicit user provenance record (CLI `--confirmation-file`) and rejects mismatched hashes. Gate 1 follows problem/assumption review; Gate 2 follows model, baseline, parameter-source, and validation-plan review; Gate 3 follows current validation, result, and figure review. Pending, rejected, stale, malformed, hashless, provenance-free, or superseded records do not authorize the next stage.
 
 ## External-data approval
 
-External modeling data requires a structured record before any download. All fields are required, `fields` is the exact requested field list, and `user_confirmation` must be exactly `true` for that stated purpose/source/license/risk scope.
+External modeling data requires a record that runtime-validates against `references/schemas/external-data-approval.schema.json` before any download. The six fields below are exact and required, `fields` is a nonempty unique requested-field list, and `user_confirmation` must be exactly `true` for that stated purpose/source/license/risk scope.
 
 ### External-data approval record
 
@@ -178,14 +231,14 @@ External modeling data requires a structured record before any download. All fie
 {
   "purpose": "Estimate the response required by Q2.",
   "fields": ["timestamp", "response"],
-  "source": "User-identified external dataset",
+  "source": "https://example.invalid/data.csv",
   "license": "License identifier verified by the user",
   "risk": "Selection bias and license-scope mismatch",
   "user_confirmation": true
 }
 ```
 
-Store the record as structured evidence in `context.data` and preserve it in later handoffs. A bare URL, inferred consent, an earlier approval for different fields, or missing license/risk evidence is not approval; use `needs_revision` and do not download.
+Store the runtime-valid record as structured evidence in `context.data` and preserve it in later handoffs. A bare URL, inferred consent, an earlier approval for different fields, an added agent override, or missing license/risk evidence is not approval; use `needs_revision` and do not download.
 
 ## Stage update expectations
 

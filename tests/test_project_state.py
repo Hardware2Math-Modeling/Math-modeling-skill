@@ -24,6 +24,17 @@ from project_state import (  # noqa: E402
 )
 
 
+def user_confirmation(digest: str = "a" * 64) -> dict[str, object]:
+    return {
+        "schema_version": "2",
+        "actor_type": "user",
+        "confirmation_method": "explicit",
+        "confirmed_by": "reviewer",
+        "confirmed_at": "2026-08-27T00:00:00Z",
+        "artifact_hashes": [digest],
+    }
+
+
 class ProjectStateTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
@@ -183,12 +194,51 @@ class ProjectStateTests(unittest.TestCase):
             confirmer="reviewer",
             artifact_hashes=[digest],
             note="accepted after review",
+            confirmation=user_confirmation(digest),
         )
         self.assertEqual("confirmed", load_current(self.project)["gates"]["gate1"])
         self.assertEqual(1, len(report["records"]))
         self.assertEqual("reviewer", report["records"][0]["confirmed_by"])
         self.assertEqual([digest], report["records"][0]["artifact_hashes"])
+        self.assertEqual(user_confirmation(digest), report["records"][0]["confirmation"])
         self.assertEqual("accepted after review", report["records"][0]["notes"])
+
+    def test_record_gate_rejects_arbitrary_confirmer_without_user_provenance(self) -> None:
+        """Catches stage code confirming a gate with only a fabricated name."""
+
+        with self.assertRaisesRegex(ValueError, "explicit user confirmation"):
+            record_gate(
+                self.project,
+                gate_id="gate1",
+                status="confirmed",
+                confirmer="fabricated-reviewer",
+                artifact_hashes=["a" * 64],
+                note="self-attested by stage output",
+            )
+        self.assertFalse((self.project / "qa/gates.json").exists())
+        self.assertEqual("pending", load_current(self.project)["gates"]["gate1"])
+
+    def test_record_gate_rejects_agent_provenance_and_hash_mismatch(self) -> None:
+        """Catches non-user provenance or confirmation bound to other artifacts."""
+
+        agent = user_confirmation()
+        agent["actor_type"] = "agent"
+        mismatch = user_confirmation("b" * 64)
+        for confirmation, message in (
+            (agent, "actor_type"),
+            (mismatch, "exactly match"),
+        ):
+            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
+                record_gate(
+                    self.project,
+                    gate_id="gate1",
+                    status="confirmed",
+                    confirmer="reviewer",
+                    artifact_hashes=["a" * 64],
+                    note="invalid provenance",
+                    confirmation=confirmation,
+                )
+        self.assertFalse((self.project / "qa/gates.json").exists())
 
     def test_nonconfirmed_gate_records_omit_confirmation_evidence(self) -> None:
         pending = record_gate(
@@ -479,7 +529,7 @@ class ProjectStateTests(unittest.TestCase):
         )
         self.assertEqual(0, result.returncode, result.stderr)
 
-    def test_cli_confirmed_gate_requires_confirmer(self) -> None:
+    def test_cli_confirmed_gate_requires_explicit_user_confirmation_file(self) -> None:
         result = subprocess.run(
             [
                 str(Path(sys.executable).resolve()),
@@ -490,6 +540,8 @@ class ProjectStateTests(unittest.TestCase):
                 "gate1",
                 "--status",
                 "confirmed",
+                "--confirmer",
+                "fabricated-reviewer",
                 "--artifact-hash",
                 "a" * 64,
             ],
@@ -499,7 +551,38 @@ class ProjectStateTests(unittest.TestCase):
             check=False,
         )
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("confirmed gates require a confirmer", result.stderr)
+        self.assertIn("explicit user confirmation", result.stderr)
+
+    def test_cli_accepts_valid_user_confirmation_file(self) -> None:
+        receipt = self.temp_path / "user-confirmation.json"
+        receipt.write_text(json.dumps(user_confirmation()), encoding="utf-8")
+        result = subprocess.run(
+            [
+                str(Path(sys.executable).resolve()),
+                str(SCRIPTS / "project_state.py"),
+                "gate",
+                str(self.project),
+                "--gate-id",
+                "gate1",
+                "--status",
+                "confirmed",
+                "--confirmer",
+                "reviewer",
+                "--artifact-hash",
+                "a" * 64,
+                "--confirmation-file",
+                str(receipt),
+            ],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        record = json.loads(
+            (self.project / "qa/gates.json").read_text(encoding="utf-8")
+        )["records"][0]
+        self.assertEqual(user_confirmation(), record["confirmation"])
 
 
 if __name__ == "__main__":

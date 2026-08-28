@@ -5,7 +5,7 @@ description: Use when a mathematical modeling problem requires coordination acro
 
 # Math Modeling Orchestrator
 
-Coordinate the task from one strict-v2 handoff and auditable project evidence. A stage recommendation never overrides a workflow guard.
+Coordinate the task from one strict-v2 handoff and auditable project evidence. A stage recommendation never overrides an authorization prerequisite.
 
 ## Load and normalize control state
 
@@ -16,13 +16,15 @@ Before routing:
 3. Load `current.json`, its `question_sources`, current artifact manifests, `qa/gates.json`, and staleness evidence when a project exists. `current.json` is a pointer, not proof that a gate is confirmed.
 4. For CUMCM, read [cumcm.json](references/competition-packs/cumcm.json). It contains defaults, not current-year rules.
 
+The transitions and `guards` in `workflow.json` are a compact index, not an exhaustive permission check. Its `authorization_policy` names `scripts/orchestrator_policy.py:authorization_errors` as authoritative. Before any action supported by that evaluator, pass the parsed current records to it and proceed only when it returns no errors; a missing or malformed record is blocking, never an invitation to infer evidence.
+
 For a new task, construct the canonical handoff before invoking a stage. For an existing task, continue from current evidence rather than restarting completed work without an evidence-backed reason.
 
 ## CUMCM verification boundary
 
-The pack intentionally has `official_sources: []`. Until a user-provided official source, or an official rule or template, has undergone read-only verification and its source, SHA-256, and verification date are recorded, do not claim current-rule compliance or submission-ready status. Never infer a year, submission URL, rule, or license from the competition name or an unofficial template.
+The pack intentionally has `official_sources: []`. Until a user-provided official source, or an official rule or template, has undergone read-only verification and a record runtime-validates against `official-verification.schema.json`, do not claim current-rule compliance or submission-ready status. Before either claim, require `authorization_errors("current-rule-claim", evidence)` or `authorization_errors("submission-readiness", evidence)` to return no blockers with that record under `official_verification`. That record binds an absolute HTTP(S) URL, real UTC verification date and timestamp, and lowercase content SHA-256 to CUMCM and the rule/template type. A filename or free-form source string is non-authorizing. Never infer a year, submission URL, rule, or license from the competition name or an unofficial template.
 
-External modeling data has a different boundary: require the structured external-data approval in the shared contract before any download. A URL, prior use, urgency, or team authority is not approval.
+External modeling data has a different boundary: require an approval that runtime-validates against `external-data-approval.schema.json` before any download. A URL, prior use, urgency, or team authority is not approval.
 
 ## Stage routing
 
@@ -42,7 +44,7 @@ After each return, merge the updated handoff without discarding `task.statement`
 
 ## Exact gates and pauses
 
-A confirmed Gate 1, Gate 2, or Gate 3 is the latest applicable record in `qa/gates.json` that runtime-validates against `references/schemas/gate.schema.json`: exact gate id and `confirmed` status, confirmer, UTC timestamp, one or more artifact hashes, notes, rollback field, and schema version. Oral approval and a `current.json` gate status alone never satisfy a gate.
+A confirmed Gate 1, Gate 2, or Gate 3 is the latest applicable record in `qa/gates.json` that runtime-validates against `references/schemas/gate.schema.json`: exact gate id and `confirmed` status, confirmer, UTC timestamp, one or more artifact hashes, notes, rollback field, schema version, and explicit user confirmation provenance validated against `gate-confirmation.schema.json`. The nested provenance must say `actor_type: user` and `confirmation_method: explicit` and bind the exact same artifact hashes; agent/stage output, an arbitrary confirmer string, Oral approval, or a `current.json` gate status never satisfies a gate.
 
 | Evidence state | Required action |
 | --- | --- |

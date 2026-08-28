@@ -9,6 +9,7 @@ import re
 from datetime import datetime
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
+from urllib.parse import urlsplit
 
 
 STAGES = (
@@ -328,6 +329,27 @@ def _safe_relative_path(value: object, path: str, errors: list[str]) -> None:
         errors.append(f"{path} must use a safe project-relative path")
 
 
+def _safe_absolute_path(value: object, path: str, errors: list[str]) -> None:
+    if not _is_nonempty_string(value):
+        errors.append(f"{path} must be a non-empty absolute path")
+        return
+    assert isinstance(value, str)
+    if (
+        any(ord(character) < 32 or ord(character) == 127 for character in value)
+        or "\u2028" in value
+        or "\u2029" in value
+    ):
+        errors.append(f"{path} must use a safe absolute path")
+        return
+    posix = PurePosixPath(value)
+    windows = PureWindowsPath(value)
+    if not (posix.is_absolute() or windows.is_absolute()) or ".." in (
+        *posix.parts,
+        *windows.parts,
+    ):
+        errors.append(f"{path} must use a safe absolute path")
+
+
 def _validate_handoff(payload: object, errors: list[str]) -> None:
     fields = (
         "schema_version",
@@ -554,6 +576,28 @@ def _validate_manifest(payload: object, errors: list[str]) -> None:
     _evidence_array(root.get("entries"), "entries", errors)
 
 
+def _validate_initialization(payload: object, errors: list[str]) -> None:
+    fields = (
+        "schema_version",
+        "competition",
+        "python_executable",
+        "template_path",
+        "created_at",
+    )
+    root = _object(payload, path="", required=fields, allowed=fields, errors=errors)
+    if root is None:
+        return
+    if root.get("schema_version") != "2" or not _is_string(root.get("schema_version")):
+        errors.append('schema_version must be exactly the string "2"')
+    _nonempty_string(root.get("competition"), "competition", errors)
+    _safe_absolute_path(root.get("python_executable"), "python_executable", errors)
+    template = root.get("template_path")
+    if template is not None:
+        _safe_relative_path(template, "template_path", errors)
+    if not _is_utc_timestamp(root.get("created_at")):
+        errors.append("created_at must be a UTC timestamp ending in Z")
+
+
 def _validate_gate(payload: object, errors: list[str]) -> None:
     required_fields = (
         "schema_version",
@@ -563,7 +607,7 @@ def _validate_gate(payload: object, errors: list[str]) -> None:
         "notes",
         "rollback_stage",
     )
-    allowed_fields = (*required_fields, "confirmed_by", "confirmed_at")
+    allowed_fields = (*required_fields, "confirmed_by", "confirmed_at", "confirmation")
     root = _object(
         payload,
         path="",
@@ -579,12 +623,16 @@ def _validate_gate(payload: object, errors: list[str]) -> None:
     _enum(root.get("status"), ("pending", "confirmed", "rejected"), "status", errors)
     has_confirmer = "confirmed_by" in root
     has_confirmed_at = "confirmed_at" in root
+    has_confirmation = "confirmation" in root
     confirmer = root.get("confirmed_by")
     confirmed_at = root.get("confirmed_at")
     if has_confirmer:
         _nonempty_string(confirmer, "confirmed_by", errors)
     if has_confirmed_at and not _is_utc_timestamp(confirmed_at):
         errors.append("confirmed_at must be a UTC timestamp ending in Z")
+    confirmation = root.get("confirmation")
+    if has_confirmation:
+        _validate_gate_confirmation(confirmation, errors, path="confirmation")
     hashes = root.get("artifact_hashes")
     if type(hashes) is not list:
         errors.append("artifact_hashes must be an array")
@@ -608,15 +656,175 @@ def _validate_gate(payload: object, errors: list[str]) -> None:
             errors.append("confirmed_by is required when status is confirmed")
         if not has_confirmed_at:
             errors.append("confirmed_at is required when status is confirmed")
+        if not has_confirmation:
+            errors.append(
+                "confirmation is required as explicit user provenance when status is confirmed"
+            )
         if type(hashes) is list and not hashes:
             errors.append("artifact_hashes must not be empty when status is confirmed")
+        if type(confirmation) is dict:
+            if confirmation.get("confirmed_by") != confirmer:
+                errors.append("confirmation.confirmed_by must exactly match confirmed_by")
+            if confirmation.get("confirmed_at") != confirmed_at:
+                errors.append("confirmation.confirmed_at must exactly match confirmed_at")
+            if confirmation.get("artifact_hashes") != hashes:
+                errors.append(
+                    "confirmation.artifact_hashes must exactly match artifact_hashes"
+                )
     else:
         if has_confirmer:
             errors.append("confirmed_by must not be present unless status is confirmed")
         if has_confirmed_at:
             errors.append("confirmed_at must not be present unless status is confirmed")
+        if has_confirmation:
+            errors.append("confirmation must not be present unless status is confirmed")
     if status == "rejected" and rollback is None:
         errors.append("rollback_stage is required when status is rejected")
+
+
+def _validate_gate_confirmation(
+    payload: object, errors: list[str], *, path: str = ""
+) -> None:
+    fields = (
+        "schema_version",
+        "actor_type",
+        "confirmation_method",
+        "confirmed_by",
+        "confirmed_at",
+        "artifact_hashes",
+    )
+    root = _object(
+        payload,
+        path=path,
+        required=fields,
+        allowed=fields,
+        errors=errors,
+    )
+    if root is None:
+        return
+    if root.get("schema_version") != "2" or not _is_string(root.get("schema_version")):
+        errors.append(f'{_path(path, "schema_version")} must be exactly the string "2"')
+    if root.get("actor_type") != "user" or not _is_string(root.get("actor_type")):
+        errors.append(f'{_path(path, "actor_type")} must be exactly "user"')
+    if (
+        root.get("confirmation_method") != "explicit"
+        or not _is_string(root.get("confirmation_method"))
+    ):
+        errors.append(
+            f'{_path(path, "confirmation_method")} must be exactly "explicit"'
+        )
+    _nonempty_string(root.get("confirmed_by"), _path(path, "confirmed_by"), errors)
+    if not _is_utc_timestamp(root.get("confirmed_at")):
+        errors.append(
+            f'{_path(path, "confirmed_at")} must be a UTC timestamp ending in Z'
+        )
+    hashes = root.get("artifact_hashes")
+    hash_path = _path(path, "artifact_hashes")
+    if type(hashes) is not list:
+        errors.append(f"{hash_path} must be an array")
+    else:
+        if not hashes:
+            errors.append(f"{hash_path} must not be empty")
+        seen: set[str] = set()
+        for index, digest in enumerate(hashes):
+            if not _is_string(digest) or _HASH_RE.fullmatch(digest) is None:
+                errors.append(f"{hash_path}[{index}] must be a SHA-256 digest")
+            elif digest in seen:
+                errors.append(f"{hash_path}[{index}] duplicates {digest!r}")
+            else:
+                seen.add(digest)
+
+
+def _validate_external_data_approval(payload: object, errors: list[str]) -> None:
+    fields = (
+        "purpose",
+        "fields",
+        "source",
+        "license",
+        "risk",
+        "user_confirmation",
+    )
+    root = _object(
+        payload,
+        path="",
+        required=fields,
+        allowed=fields,
+        errors=errors,
+    )
+    if root is None:
+        return
+    for field in ("purpose", "source", "license", "risk"):
+        _nonempty_string(root.get(field), field, errors)
+
+    approved_fields = root.get("fields")
+    if type(approved_fields) is not list:
+        errors.append("fields must be an array")
+    else:
+        if not approved_fields:
+            errors.append("fields must not be empty")
+        seen: set[str] = set()
+        for index, value in enumerate(approved_fields):
+            item_path = f"fields[{index}]"
+            _nonempty_string(value, item_path, errors)
+            if _is_string(value):
+                if value in seen:
+                    errors.append(f"{item_path} duplicates {value!r}")
+                seen.add(value)
+
+    if type(root.get("user_confirmation")) is not bool or root.get(
+        "user_confirmation"
+    ) is not True:
+        errors.append("user_confirmation must be exactly true")
+
+
+def _validate_official_verification(payload: object, errors: list[str]) -> None:
+    fields = (
+        "schema_version",
+        "competition",
+        "source_type",
+        "source_url",
+        "verified_at",
+        "content_sha256",
+    )
+    root = _object(
+        payload,
+        path="",
+        required=fields,
+        allowed=fields,
+        errors=errors,
+    )
+    if root is None:
+        return
+    if root.get("schema_version") != "2" or not _is_string(root.get("schema_version")):
+        errors.append('schema_version must be exactly the string "2"')
+    if root.get("competition") != "CUMCM" or not _is_string(root.get("competition")):
+        errors.append('competition must be exactly "CUMCM"')
+    _enum(root.get("source_type"), ("rule", "template"), "source_type", errors)
+
+    source_url = root.get("source_url")
+    valid_url = _is_nonempty_string(source_url)
+    if valid_url:
+        assert isinstance(source_url, str)
+        valid_url = not any(character.isspace() for character in source_url)
+        try:
+            parsed = urlsplit(source_url)
+            valid_url = (
+                valid_url
+                and parsed.scheme in ("http", "https")
+                and bool(parsed.hostname)
+                and parsed.username is None
+                and parsed.password is None
+            )
+            parsed.port
+        except ValueError:
+            valid_url = False
+    if not valid_url:
+        errors.append("source_url must be an absolute http:// or https:// URL")
+    if not _is_utc_timestamp(root.get("verified_at")):
+        errors.append("verified_at must be a real UTC timestamp ending in Z")
+    content_hash = root.get("content_sha256")
+    if not _is_string(content_hash) or _HASH_RE.fullmatch(content_hash) is None:
+        errors.append("content_sha256 must be a lowercase SHA-256 digest")
 
 
 def validate_document(
@@ -628,7 +836,11 @@ def validate_document(
         "handoff": _validate_handoff,
         "iteration": _validate_iteration,
         "manifest": _validate_manifest,
+        "initialization": _validate_initialization,
         "gate": _validate_gate,
+        "gate-confirmation": _validate_gate_confirmation,
+        "external-data-approval": _validate_external_data_approval,
+        "official-verification": _validate_official_verification,
     }
     if kind not in validators:
         raise ValueError(f"unsupported document kind: {kind}")
@@ -651,17 +863,71 @@ def validate_document(
     return errors
 
 
-def _copy_array(value: object) -> list[Any]:
-    return copy.deepcopy(value) if type(value) is list else []
+def _legacy_object(
+    root: dict[str, object], field: str, allowed: tuple[str, ...]
+) -> dict[str, Any]:
+    """Copy one optional v1 object without discarding malformed evidence."""
+
+    if field not in root:
+        return {}
+    value = root[field]
+    if type(value) is not dict:
+        raise ValueError(f"{field} must be an object when present")
+    unknown = sorted(set(value) - set(allowed))
+    if unknown:
+        paths = ", ".join(f"{field}.{name}" for name in unknown)
+        raise ValueError(f"unrecognized legacy fields: {paths}")
+    return copy.deepcopy(value)
 
 
-def _copy_object(value: object) -> dict[str, Any]:
-    return copy.deepcopy(value) if type(value) is dict else {}
+def _legacy_array(
+    root: dict[str, object], field: str, *, parent: str = ""
+) -> list[Any]:
+    """Copy one optional v1 array while distinguishing missing from malformed."""
+
+    if field not in root:
+        return []
+    value = root[field]
+    path = _path(parent, field)
+    if type(value) is not list:
+        raise ValueError(f"{path} must be an array when present")
+    return copy.deepcopy(value)
+
+
+def _legacy_optional_nonempty_string(
+    root: dict[str, object], field: str, *, parent: str = "", allow_null: bool = False
+) -> None:
+    if field not in root:
+        return
+    value = root[field]
+    if allow_null and value is None:
+        return
+    if not _is_nonempty_string(value):
+        raise ValueError(f"{_path(parent, field)} must be a non-empty string when present")
+
+
+def _legacy_optional_enum(
+    root: dict[str, object],
+    field: str,
+    allowed: tuple[str, ...],
+    *,
+    parent: str = "",
+    allow_null: bool = False,
+) -> None:
+    if field not in root:
+        return
+    value = root[field]
+    if allow_null and value is None:
+        return
+    if not _is_string(value) or value not in allowed:
+        raise ValueError(
+            f"{_path(parent, field)} must be one of {', '.join(allowed)} when present"
+        )
 
 
 def _legacy_artifacts(value: object) -> list[dict[str, Any]]:
     if type(value) is not list:
-        return []
+        raise ValueError("artifacts must be an array when present")
     migrated: list[dict[str, Any]] = []
     allowed = ("path", "kind", "description", "sha256")
     for index, item in enumerate(value):
@@ -693,12 +959,83 @@ def migrate_payload(payload: dict[str, object]) -> dict[str, object]:
     if version != "1" or not _is_string(version):
         raise ValueError('schema_version must be exactly the string "1" or "2"')
 
-    legacy_task = _copy_object(payload.get("task"))
-    legacy_state = _copy_object(payload.get("state"))
-    legacy_context = _copy_object(payload.get("context"))
-    legacy_quality = _copy_object(payload.get("quality"))
-    legacy_result = _copy_object(payload.get("result"))
-    legacy_next = _copy_object(payload.get("next"))
+    root_fields = (
+        "schema_version",
+        "task",
+        "state",
+        "context",
+        "artifacts",
+        "quality",
+        "result",
+        "next",
+    )
+    unknown_root = sorted(set(payload) - set(root_fields))
+    if unknown_root:
+        raise ValueError(
+            "unrecognized legacy fields: " + ", ".join(unknown_root)
+        )
+
+    task_fields = ("statement", "objectives", "constraints")
+    state_fields = (
+        "current_stage",
+        "status",
+        "validation_status",
+        "completed_stages",
+        "invalidated_stages",
+    )
+    quality_fields = ("checks", "warnings", "confidence", "limitations")
+    next_fields = ("recommended_stage", "rationale", "alternatives", "failed_checks")
+    legacy_task = _legacy_object(payload, "task", task_fields)
+    legacy_state = _legacy_object(payload, "state", state_fields)
+    legacy_context = _legacy_object(payload, "context", CONTEXT_FIELDS)
+    legacy_quality = _legacy_object(payload, "quality", quality_fields)
+    legacy_result = _legacy_object(payload, "result", RESULT_FIELDS)
+    legacy_next = _legacy_object(payload, "next", next_fields)
+
+    _legacy_optional_nonempty_string(legacy_task, "statement", parent="task")
+    _legacy_optional_enum(legacy_state, "current_stage", STAGES, parent="state")
+    _legacy_optional_enum(legacy_state, "status", STATUSES, parent="state")
+    _legacy_optional_enum(
+        legacy_state,
+        "validation_status",
+        VALIDATION_STATUSES,
+        parent="state",
+    )
+    _legacy_optional_enum(
+        legacy_quality,
+        "confidence",
+        ("high", "medium", "low"),
+        parent="quality",
+    )
+    _legacy_optional_nonempty_string(
+        legacy_result, "summary", parent="result"
+    )
+    _legacy_optional_nonempty_string(
+        legacy_result, "accepted_model", parent="result", allow_null=True
+    )
+    _legacy_optional_nonempty_string(legacy_next, "rationale", parent="next")
+    _legacy_optional_enum(
+        legacy_next,
+        "recommended_stage",
+        (*STAGES, "complete"),
+        parent="next",
+        allow_null=True,
+    )
+
+    for field in ("objectives", "constraints"):
+        _legacy_array(legacy_task, field, parent="task")
+    for field in ("completed_stages", "invalidated_stages"):
+        _legacy_array(legacy_state, field, parent="state")
+    for field in CONTEXT_FIELDS:
+        _legacy_array(legacy_context, field, parent="context")
+    for field in quality_fields:
+        if field != "confidence":
+            _legacy_array(legacy_quality, field, parent="quality")
+    for field in RESULT_FIELDS:
+        if field not in ("summary", "accepted_model"):
+            _legacy_array(legacy_result, field, parent="result")
+    for field in ("alternatives", "failed_checks"):
+        _legacy_array(legacy_next, field, parent="next")
 
     statement = legacy_task.get("statement")
     if not _is_nonempty_string(statement):
@@ -713,15 +1050,22 @@ def migrate_payload(payload: dict[str, object]) -> dict[str, object]:
     if validation_status not in VALIDATION_STATUSES or not _is_string(validation_status):
         validation_status = "pending"
 
-    context = {field: _copy_array(legacy_context.get(field)) for field in CONTEXT_FIELDS}
+    context = {
+        field: _legacy_array(legacy_context, field, parent="context")
+        for field in CONTEXT_FIELDS
+    }
     context["decisions"].append(
         {
             "statement": "Migrated from schema_version 1.",
             "provenance": "scripts/migrate_handoff.py",
         }
     )
-    artifacts = _legacy_artifacts(payload.get("artifacts"))
-    warnings = _copy_array(legacy_quality.get("warnings"))
+    artifacts = (
+        _legacy_artifacts(payload["artifacts"])
+        if "artifacts" in payload
+        else []
+    )
+    warnings = _legacy_array(legacy_quality, "warnings", parent="quality")
     raw_artifacts = payload.get("artifacts")
     has_hash_evidence = bool(raw_artifacts) and type(raw_artifacts) is list and all(
         type(artifact) is dict
@@ -744,7 +1088,7 @@ def migrate_payload(payload: dict[str, object]) -> dict[str, object]:
     rationale = legacy_next.get("rationale")
     if not _is_nonempty_string(rationale):
         rationale = "Migration requires review before any forward transition."
-    failed_checks = _copy_array(legacy_next.get("failed_checks"))
+    failed_checks = _legacy_array(legacy_next, "failed_checks", parent="next")
     recommended_stage = copy.deepcopy(legacy_next.get("recommended_stage"))
     if recommended_stage is not None and not _is_nonempty_string(recommended_stage):
         recommended_stage = None
@@ -760,20 +1104,24 @@ def migrate_payload(payload: dict[str, object]) -> dict[str, object]:
         "schema_version": "2",
         "task": {
             "statement": copy.deepcopy(statement),
-            "objectives": _copy_array(legacy_task.get("objectives")),
-            "constraints": _copy_array(legacy_task.get("constraints")),
+            "objectives": _legacy_array(legacy_task, "objectives", parent="task"),
+            "constraints": _legacy_array(legacy_task, "constraints", parent="task"),
         },
         "state": {
             "current_stage": current_stage,
             "status": status,
             "validation_status": validation_status,
-            "completed_stages": _copy_array(legacy_state.get("completed_stages")),
-            "invalidated_stages": _copy_array(legacy_state.get("invalidated_stages")),
+            "completed_stages": _legacy_array(
+                legacy_state, "completed_stages", parent="state"
+            ),
+            "invalidated_stages": _legacy_array(
+                legacy_state, "invalidated_stages", parent="state"
+            ),
         },
         "context": context,
         "artifacts": artifacts,
         "quality": {
-            "checks": _copy_array(legacy_quality.get("checks")),
+            "checks": _legacy_array(legacy_quality, "checks", parent="quality"),
             "warnings": warnings,
             "confidence": (
                 copy.deepcopy(legacy_quality.get("confidence"))
@@ -781,30 +1129,41 @@ def migrate_payload(payload: dict[str, object]) -> dict[str, object]:
                 and _is_string(legacy_quality.get("confidence"))
                 else "low"
             ),
-            "limitations": _copy_array(legacy_quality.get("limitations")),
+            "limitations": _legacy_array(
+                legacy_quality, "limitations", parent="quality"
+            ),
         },
         "result": {
             "summary": copy.deepcopy(summary),
-            "details": _copy_array(legacy_result.get("details")),
+            "details": _legacy_array(legacy_result, "details", parent="result"),
             "accepted_model": (
                 copy.deepcopy(legacy_result.get("accepted_model"))
                 if _is_nonempty_string(legacy_result.get("accepted_model"))
                 else None
             ),
-            "rejected_alternatives": _copy_array(
-                legacy_result.get("rejected_alternatives")
+            "rejected_alternatives": _legacy_array(
+                legacy_result, "rejected_alternatives", parent="result"
             ),
-            "evidence": _copy_array(legacy_result.get("evidence")),
-            "computed_values": _copy_array(legacy_result.get("computed_values")),
-            "citations": _copy_array(legacy_result.get("citations")),
+            "evidence": _legacy_array(legacy_result, "evidence", parent="result"),
+            "computed_values": _legacy_array(
+                legacy_result, "computed_values", parent="result"
+            ),
+            "citations": _legacy_array(legacy_result, "citations", parent="result"),
         },
         "next": {
             "recommended_stage": recommended_stage,
             "rationale": copy.deepcopy(rationale),
-            "alternatives": _copy_array(legacy_next.get("alternatives")),
+            "alternatives": _legacy_array(legacy_next, "alternatives", parent="next"),
             "failed_checks": failed_checks,
         },
     }
+    migration_errors: list[str] = []
+    _validate_handoff(migrated, migration_errors)
+    if migration_errors:
+        raise ValueError(
+            "legacy handoff cannot migrate without loss:\n- "
+            + "\n- ".join(migration_errors)
+        )
     return migrated
 
 

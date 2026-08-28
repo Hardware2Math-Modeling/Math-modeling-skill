@@ -82,6 +82,17 @@ class WorkflowContractTests(unittest.TestCase):
             guards["paper-production"],
         )
 
+    def test_workflow_points_to_authoritative_non_exhaustive_policy(self) -> None:
+        """Catches callers treating the compact workflow guard index as permission."""
+
+        self.assertEqual(
+            {
+                "evaluator": "scripts/orchestrator_policy.py:authorization_errors",
+                "workflow_guards_exhaustive": False,
+            },
+            self.load_workflow().get("authorization_policy"),
+        )
+
     def test_failed_validation_cannot_reach_paper_or_complete(self) -> None:
         failed = self.load_workflow()["transitions"]["validation-fail"]
         for forbidden in ("paper-writing", "paper-production", "complete"):

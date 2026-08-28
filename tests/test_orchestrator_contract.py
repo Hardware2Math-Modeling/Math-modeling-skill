@@ -159,15 +159,24 @@ class OrchestratorContractTests(unittest.TestCase):
                     "status",
                     "confirmed_by",
                     "confirmed_at",
+                    "confirmation",
                     "artifact_hashes",
                     "notes",
                     "rollback_stage",
                 },
                 set(record),
             )
+            self.assertEqual("user", record["confirmation"]["actor_type"])
+            self.assertEqual(
+                "explicit", record["confirmation"]["confirmation_method"]
+            )
+            self.assertEqual(
+                record["artifact_hashes"], record["confirmation"]["artifact_hashes"]
+            )
         text = ORCHESTRATOR.read_text(encoding="utf-8")
         self.assertIn("Oral approval", text)
         self.assertIn("current.json", text)
+        self.assertIn("explicit user confirmation provenance", text)
 
     def test_gate_placement_is_fail_closed(self) -> None:
         """Catches model, solve, or paper routes occurring before their decision gate."""
@@ -236,10 +245,17 @@ class OrchestratorContractTests(unittest.TestCase):
     def test_official_read_only_verification_records_source_hash_and_date(self) -> None:
         """Catches untraceable official-rule/template checks and stale compliance claims."""
 
+        contract = HANDOFF_CONTRACT.read_text(encoding="utf-8")
+        record = fenced_json_after(contract, "### Official verification record")
+        self.assertEqual(
+            [], validate_document(record, kind="official-verification")
+        )
+        self.assertEqual("CUMCM", record["competition"])
+        self.assertTrue(record["source_url"].startswith(("https://", "http://")))
         text = ORCHESTRATOR.read_text(encoding="utf-8")
         self.assertIn("official rule or template", text)
         self.assertIn("read-only verification", text)
-        self.assertIn("source, SHA-256, and verification date", text)
+        self.assertIn("official-verification.schema.json", text)
 
     def test_paper_routes_require_current_evidence_and_fail_closed_pauses(self) -> None:
         """Catches drafting/production on stale validation, missing content, or failed QA."""

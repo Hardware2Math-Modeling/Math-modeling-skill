@@ -75,6 +75,17 @@ def valid_pending_gate() -> dict[str, object]:
     }
 
 
+def valid_gate_confirmation(digest: str = "a" * 64) -> dict[str, object]:
+    return {
+        "schema_version": "2",
+        "actor_type": "user",
+        "confirmation_method": "explicit",
+        "confirmed_by": "reviewer",
+        "confirmed_at": "2026-08-27T00:00:00Z",
+        "artifact_hashes": [digest],
+    }
+
+
 def valid_confirmed_gate() -> dict[str, object]:
     payload = valid_pending_gate()
     payload.update(
@@ -83,6 +94,7 @@ def valid_confirmed_gate() -> dict[str, object]:
             "confirmed_by": "reviewer",
             "confirmed_at": "2026-08-27T00:00:00Z",
             "artifact_hashes": ["a" * 64],
+            "confirmation": valid_gate_confirmation(),
         }
     )
     return payload
@@ -106,6 +118,17 @@ def valid_manifest() -> dict[str, object]:
         "manifest_type": "input",
         "created_at": "2026-08-27T00:00:00Z",
         "entries": [{"path": "input/problem.pdf", "sha256": "a" * 64}],
+    }
+
+
+def valid_official_verification() -> dict[str, object]:
+    return {
+        "schema_version": "2",
+        "competition": "CUMCM",
+        "source_type": "rule",
+        "source_url": "https://example.invalid/shape-only/rules.pdf",
+        "verified_at": "2026-08-27T00:00:00Z",
+        "content_sha256": "d" * 64,
     }
 
 
@@ -480,9 +503,11 @@ class HandoffSchemaTests(unittest.TestCase):
                     payload["rollback_stage"] = "problem-analysis"
                 payload["confirmed_by"] = "reviewer"
                 payload["confirmed_at"] = "2026-08-27T00:00:00Z"
+                payload["confirmation"] = valid_gate_confirmation()
                 errors = validate_document(payload, kind="gate")
                 self.assertTrue(any("confirmed_by" in error for error in errors))
                 self.assertTrue(any("confirmed_at" in error for error in errors))
+                self.assertTrue(any("confirmation" in error for error in errors))
 
     def test_gate_rejects_duplicate_artifact_hashes(self) -> None:
         payload = valid_pending_gate()
@@ -499,15 +524,23 @@ class HandoffSchemaTests(unittest.TestCase):
         )
         confirmed_properties = confirmed["then"]["properties"]
         self.assertEqual(
-            ["confirmed_by", "confirmed_at"],
+            ["confirmed_by", "confirmed_at", "confirmation"],
             confirmed["then"]["required"],
         )
         self.assertEqual("string", confirmed_properties["confirmed_by"]["type"])
         self.assertEqual("string", confirmed_properties["confirmed_at"]["type"])
+        self.assertEqual(
+            "gate-confirmation.schema.json",
+            confirmed_properties["confirmation"]["$ref"],
+        )
         self.assertEqual(1, confirmed_properties["artifact_hashes"]["minItems"])
         forbidden = confirmed["else"]["not"]["anyOf"]
         self.assertEqual(
-            [{"required": ["confirmed_by"]}, {"required": ["confirmed_at"]}],
+            [
+                {"required": ["confirmed_by"]},
+                {"required": ["confirmed_at"]},
+                {"required": ["confirmation"]},
+            ],
             forbidden,
         )
         self.assertEqual(
@@ -519,6 +552,113 @@ class HandoffSchemaTests(unittest.TestCase):
 
     def test_confirmed_gate_accepts_utc_hash_evidence(self) -> None:
         self.assertEqual([], validate_document(valid_confirmed_gate(), kind="gate"))
+
+    def test_confirmed_gate_requires_explicit_user_confirmation_provenance(self) -> None:
+        """Catches an agent/stage or arbitrary confirmer self-attesting a gate."""
+
+        missing = valid_confirmed_gate()
+        missing.pop("confirmation")
+        self.assertTrue(
+            any("confirmation" in error for error in validate_document(missing, kind="gate"))
+        )
+
+        fabricated = valid_confirmed_gate()
+        fabricated["confirmation"]["actor_type"] = "agent"
+        self.assertTrue(
+            any(
+                "confirmation.actor_type" in error
+                for error in validate_document(fabricated, kind="gate")
+            )
+        )
+
+        inferred = valid_confirmed_gate()
+        inferred["confirmation"]["confirmation_method"] = "inferred"
+        self.assertTrue(
+            any(
+                "confirmation.confirmation_method" in error
+                for error in validate_document(inferred, kind="gate")
+            )
+        )
+
+    def test_gate_confirmation_must_bind_exact_gate_artifact_hashes(self) -> None:
+        """Catches confirmation for different evidence authorizing the current gate."""
+
+        payload = valid_confirmed_gate()
+        payload["confirmation"]["artifact_hashes"] = ["b" * 64]
+        errors = validate_document(payload, kind="gate")
+        self.assertTrue(any("exactly match" in error for error in errors))
+
+    def test_gate_confirmation_is_a_strict_versioned_document(self) -> None:
+        """Catches provenance records that omit the explicit user boundary."""
+
+        self.assertEqual(
+            [], validate_document(valid_gate_confirmation(), kind="gate-confirmation")
+        )
+        schema = load_schema("gate-confirmation")
+        self.assertEqual(
+            {
+                "schema_version",
+                "actor_type",
+                "confirmation_method",
+                "confirmed_by",
+                "confirmed_at",
+                "artifact_hashes",
+            },
+            set(schema["required"]),
+        )
+        self.assertEqual("user", schema["properties"]["actor_type"]["const"])
+        self.assertEqual(
+            "explicit", schema["properties"]["confirmation_method"]["const"]
+        )
+
+    def test_official_verification_accepts_only_structured_web_source_evidence(self) -> None:
+        """Catches a local filename or malformed metadata authorizing official status."""
+
+        self.assertEqual(
+            [],
+            validate_document(
+                valid_official_verification(), kind="official-verification"
+            ),
+        )
+        cases = {
+            "missing URL": ("source_url", None),
+            "local filename": ("source_url", "rules.pdf"),
+            "file URL": ("source_url", "file:///tmp/rules.pdf"),
+            "missing host": ("source_url", "https:///rules.pdf"),
+            "non-UTC date": ("verified_at", "2026-08-27T08:00:00+08:00"),
+            "impossible date": ("verified_at", "2026-02-31T00:00:00Z"),
+            "short hash": ("content_sha256", "d" * 63),
+            "uppercase hash": ("content_sha256", "D" * 64),
+        }
+        for label, (field, value) in cases.items():
+            with self.subTest(label=label):
+                payload = valid_official_verification()
+                if value is None:
+                    payload.pop(field)
+                else:
+                    payload[field] = value
+                errors = validate_document(payload, kind="official-verification")
+                self.assertTrue(any(field in error for error in errors), errors)
+
+    def test_official_verification_schema_has_exact_claim_binding_fields(self) -> None:
+        """Catches an unbound source string replacing URL/date/content-hash evidence."""
+
+        schema = load_schema("official-verification")
+        self.assertEqual(
+            {
+                "schema_version",
+                "competition",
+                "source_type",
+                "source_url",
+                "verified_at",
+                "content_sha256",
+            },
+            set(schema["required"]),
+        )
+        self.assertEqual("CUMCM", schema["properties"]["competition"]["const"])
+        self.assertEqual(
+            ["rule", "template"], schema["properties"]["source_type"]["enum"]
+        )
 
     def test_confirmed_gate_rejects_non_utc_timestamp(self) -> None:
         payload = valid_confirmed_gate()
@@ -621,6 +761,82 @@ class HandoffSchemaTests(unittest.TestCase):
         )
         self.assertEqual([], validate_document(migrated, kind="handoff"))
 
+    def test_migration_rejects_unknown_legacy_contract_fields_without_dropping_them(self) -> None:
+        """Catches unrecognized evidence being silently omitted from the v2 handoff."""
+
+        cases = {
+            "critical_evidence": ("critical_evidence", {"value": "root evidence"}),
+            "task.critical_evidence": ("task", {"critical_evidence": "task evidence"}),
+            "state.critical_evidence": ("state", {"critical_evidence": "state evidence"}),
+            "context.critical_evidence": (
+                "context",
+                {"critical_evidence": [{"value": "context evidence"}]},
+            ),
+            "quality.critical_evidence": (
+                "quality",
+                {"critical_evidence": [{"value": "quality evidence"}]},
+            ),
+            "result.critical_evidence": (
+                "result",
+                {"critical_evidence": [{"value": "result evidence"}]},
+            ),
+            "next.critical_evidence": (
+                "next",
+                {"critical_evidence": [{"value": "routing evidence"}]},
+            ),
+        }
+        for expected_path, (container, value) in cases.items():
+            with self.subTest(path=expected_path):
+                legacy = valid_legacy_handoff()
+                if container == "critical_evidence":
+                    legacy[container] = value
+                else:
+                    legacy.setdefault(container, {}).update(value)
+                with self.assertRaisesRegex(ValueError, expected_path.replace(".", r"\.")):
+                    migrate_payload(legacy)
+                self.assertTrue(
+                    any(
+                        expected_path in error
+                        for error in validate_document(
+                            legacy, kind="handoff", mode="legacy"
+                        )
+                    )
+                )
+
+    def test_migration_rejects_malformed_legacy_containers_instead_of_emptying_them(self) -> None:
+        """Catches malformed known evidence containers being coerced to empty values."""
+
+        cases = {
+            "task": ("task", []),
+            "state": ("state", []),
+            "context": ("context", []),
+            "artifacts": ("artifacts", {}),
+            "quality": ("quality", []),
+            "result": ("result", []),
+            "next": ("next", []),
+            "context.assumptions": ("context", {"assumptions": {"lost": True}}),
+            "quality.checks": ("quality", {"checks": {"lost": True}}),
+            "result.evidence": ("result", {"evidence": {"lost": True}}),
+            "next.failed_checks": ("next", {"failed_checks": {"lost": True}}),
+        }
+        for expected_path, (container, value) in cases.items():
+            with self.subTest(path=expected_path):
+                legacy = valid_legacy_handoff()
+                if type(value) is dict and type(legacy.get(container)) is dict:
+                    legacy[container].update(value)
+                else:
+                    legacy[container] = value
+                with self.assertRaisesRegex(ValueError, expected_path.replace(".", r"\.")):
+                    migrate_payload(legacy)
+                self.assertTrue(
+                    any(
+                        expected_path in error
+                        for error in validate_document(
+                            legacy, kind="handoff", mode="legacy"
+                        )
+                    )
+                )
+
     def test_migration_marks_unhashed_legacy_pass_stale(self) -> None:
         legacy = {
             "schema_version": "1",
@@ -646,23 +862,33 @@ class HandoffSchemaTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, r"artifacts\[1\]"):
             migrate_payload(legacy)
 
-    def test_legacy_pass_with_incomplete_artifact_is_always_stale(self) -> None:
+    def test_legacy_pass_rejects_incomplete_artifact_without_dropping_fields(self) -> None:
         complete = {
             "path": "artifacts/result.json",
             "kind": "result",
             "description": "evidence",
             "sha256": "a" * 64,
         }
-        for missing in complete:
+        for missing in ("path", "kind", "description"):
             with self.subTest(missing=missing):
                 legacy = valid_legacy_handoff()
                 legacy["state"]["validation_status"] = "pass"
                 artifact = dict(complete)
                 artifact.pop(missing)
                 legacy["artifacts"] = [artifact]
-                migrated = migrate_payload(legacy)
-                self.assertEqual("stale", migrated["state"]["validation_status"])
-                self.assertTrue(any("hash" in warning for warning in migrated["quality"]["warnings"]))
+                with self.assertRaisesRegex(ValueError, rf"artifacts\[0\]\.{missing}"):
+                    migrate_payload(legacy)
+
+        legacy = valid_legacy_handoff()
+        legacy["state"]["validation_status"] = "pass"
+        unhashed = dict(complete)
+        unhashed.pop("sha256")
+        legacy["artifacts"] = [unhashed]
+        migrated = migrate_payload(legacy)
+        self.assertEqual("stale", migrated["state"]["validation_status"])
+        self.assertTrue(
+            any("hash" in warning for warning in migrated["quality"]["warnings"])
+        )
 
     def test_legacy_mode_explicitly_migrates_for_validation(self) -> None:
         legacy = {
@@ -1059,7 +1285,14 @@ class HandoffSchemaTests(unittest.TestCase):
                 load_and_validate(handoff, kind="handoff")
 
     def test_all_versioned_schema_documents_are_strict_json_objects(self) -> None:
-        for kind in ("handoff", "iteration", "manifest", "gate"):
+        for kind in (
+            "handoff",
+            "iteration",
+            "manifest",
+            "gate",
+            "gate-confirmation",
+            "official-verification",
+        ):
             with self.subTest(kind=kind):
                 schema = load_schema(kind)
                 self.assertEqual("https://json-schema.org/draft/2020-12/schema", schema["$schema"])

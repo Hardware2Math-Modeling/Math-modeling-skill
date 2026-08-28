@@ -13,7 +13,7 @@ Accept the current handoff plus available datasets, schemas, and source notes. W
 
 ## External-data approval gate
 
-Require the shared contract's exact structured approval record before any download of external modeling data. It contains `purpose`, `fields`, `source`, `license`, `risk`, and `user_confirmation: true`, recording 用途、字段、来源、许可证、风险和用户确认 for this exact acquisition scope. A URL, teammate instruction, prior approval for different fields, or vague authorization is not a substitute.
+Require an exact approval record that runtime-validates against the shared `external-data-approval.schema.json` before any download of external modeling data. It contains `purpose`, `fields`, `source`, `license`, `risk`, and `user_confirmation: true`, recording 用途、字段、来源、许可证、风险和用户确认 for this exact acquisition scope. A URL, teammate instruction, prior approval for different fields, added agent field, or vague authorization is not a substitute.
 
 If the record is missing, incomplete, stale, or has `user_confirmation` other than `true`, pause without downloading and return `needs_revision` with the missing fields in `next.failed_checks`. Official-rule or template read-only verification is not external modeling data; its source, SHA-256, and verification date remain governed by the orchestrator.
 

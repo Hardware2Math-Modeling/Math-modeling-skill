@@ -158,6 +158,7 @@ _WORKFLOW_KEYS = {
     "stages",
     "transitions",
     "guards",
+    "authorization_policy",
     "handoff",
 }
 _WORKFLOW_STAGE_KEYS = {"id", "skill", "optional"}
@@ -181,6 +182,10 @@ _EXPECTED_GUARDS = {
     },
 }
 _WORKFLOW_GUARD_KEYS = set(_EXPECTED_GUARDS)
+_EXPECTED_AUTHORIZATION_POLICY = {
+    "evaluator": "scripts/orchestrator_policy.py:authorization_errors",
+    "workflow_guards_exhaustive": False,
+}
 _EXPECTED_SUPPORT_CONTRACT = {
     "schema_version": "1",
     "skill": "math-modeling-method-library",
@@ -886,6 +891,22 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
                 )
             if not _exact_value_equal(guard, expected_guard):
                 errors.append(f"workflow guard {guard_name} must match its required contract")
+
+    authorization_policy = workflow.get("authorization_policy")
+    if not isinstance(authorization_policy, dict) or not _exact_value_equal(
+        authorization_policy,
+        _EXPECTED_AUTHORIZATION_POLICY,
+    ):
+        errors.append(
+            "workflow authorization_policy must name the authoritative evaluator "
+            "and mark guards non-exhaustive"
+        )
+    else:
+        _read_text(
+            root / "scripts" / "orchestrator_policy.py",
+            errors,
+            "workflow authorization evaluator",
+        )
 
     handoff = workflow.get("handoff")
     if not isinstance(handoff, dict):

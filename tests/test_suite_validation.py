@@ -62,6 +62,13 @@ def make_valid_suite(root):
     }
     write_json(root / ".codex-plugin" / "plugin.json", manifest)
 
+    policy = root / "scripts" / "orchestrator_policy.py"
+    policy.parent.mkdir()
+    policy.write_text(
+        "def authorization_errors(action, evidence):\n    return []\n",
+        encoding="utf-8",
+    )
+
     for skill in EXPECTED_ALL_SKILLS:
         skill_dir = root / "skills" / skill
         skill_dir.mkdir(parents=True, exist_ok=True)
@@ -173,6 +180,10 @@ def make_valid_suite(root):
                 "requires_paper_request": True,
                 "requires_paper_writing": True,
             },
+        },
+        "authorization_policy": {
+            "evaluator": "scripts/orchestrator_policy.py:authorization_errors",
+            "workflow_guards_exhaustive": False,
         },
         "handoff": {
             "required_fields": list(HANDOFF_REQUIRED_FIELDS),
@@ -571,6 +582,36 @@ class SuiteValidationTests(unittest.TestCase):
             )
             self.assertIn(
                 "workflow handoff contains unsupported keys: unexpected", errors
+            )
+
+    def test_authorization_policy_pointer_must_be_exact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            workflow_path = (
+                root
+                / "skills"
+                / "math-modeling-orchestrator"
+                / "references"
+                / "workflow.json"
+            )
+            workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+            workflow["authorization_policy"]["workflow_guards_exhaustive"] = True
+            write_json(workflow_path, workflow)
+            self.assertIn(
+                "workflow authorization_policy must name the authoritative evaluator "
+                "and mark guards non-exhaustive",
+                validate_suite(root),
+            )
+
+    def test_authorization_policy_pointer_must_resolve_to_regular_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            (root / "scripts/orchestrator_policy.py").unlink()
+            self.assertIn(
+                "missing workflow authorization evaluator",
+                validate_suite(root),
             )
 
     def test_each_guard_rejects_unknown_keys(self):

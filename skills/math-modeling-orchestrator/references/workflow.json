@@ -108,6 +108,10 @@
       "requires_paper_writing": true
     }
   },
+  "authorization_policy": {
+    "evaluator": "scripts/orchestrator_policy.py:authorization_errors",
+    "workflow_guards_exhaustive": false
+  },
   "handoff": {
     "required_fields": [
       "schema_version",

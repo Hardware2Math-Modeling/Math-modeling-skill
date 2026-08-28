@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "external-data-approval.schema.json",
+  "title": "External modeling data approval",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "purpose",
+    "fields",
+    "source",
+    "license",
+    "risk",
+    "user_confirmation"
+  ],
+  "properties": {
+    "purpose": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "fields": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1, "pattern": "\\S"},
+      "minItems": 1,
+      "uniqueItems": true
+    },
+    "source": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "license": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "risk": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "user_confirmation": {"const": true}
+  }
+}

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import re
@@ -245,7 +246,11 @@ def init_project(
             ),
             "created_at": created_at,
         }
-        atomic_write_json(iteration / "state/initialization.json", initialization)
+        _write_validated_json(
+            iteration / "state/initialization.json",
+            initialization,
+            "initialization",
+        )
         current: dict[str, object] = {
             "schema_version": SCHEMA_VERSION,
             "project_id": _project_id(project),
@@ -389,6 +394,7 @@ def record_gate(
     confirmer: str | None,
     artifact_hashes: Sequence[str],
     note: str,
+    confirmation: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Append one auditable gate record and return the updated gate report."""
 
@@ -409,10 +415,25 @@ def record_gate(
         raise ValueError("artifact hashes must contain SHA-256 digests")
     if len(set(hashes)) != len(hashes):
         raise ValueError("artifact hashes must not contain duplicates")
-    if status == "confirmed" and (
-        confirmer is None or not confirmer.strip() or not hashes
-    ):
-        raise ValueError("confirmed gates require a confirmer and artifact hashes")
+    if status == "confirmed":
+        if confirmation is None:
+            raise ValueError(
+                "confirmed gates require an explicit user confirmation provenance record"
+            )
+        validated_confirmation = _validate_payload(
+            confirmation, "gate-confirmation"
+        )
+        confirmed_by = validated_confirmation["confirmed_by"]
+        confirmed_hashes = validated_confirmation["artifact_hashes"]
+        assert type(confirmed_by) is str and type(confirmed_hashes) is list
+        if confirmer is not None and confirmer.strip() != confirmed_by:
+            raise ValueError("confirmer must exactly match confirmation.confirmed_by")
+        if confirmed_hashes != hashes:
+            raise ValueError(
+                "confirmation artifact hashes must exactly match gate artifact hashes"
+            )
+    elif confirmation is not None:
+        raise ValueError("confirmation is allowed only for a confirmed gate")
 
     timestamp = utc_now()
     record = {
@@ -424,8 +445,14 @@ def record_gate(
         "rollback_stage": ROLLBACK_STAGES[gate_id] if status == "rejected" else None,
     }
     if status == "confirmed":
-        assert confirmer is not None
-        record.update({"confirmed_by": confirmer.strip(), "confirmed_at": timestamp})
+        assert confirmation is not None
+        record.update(
+            {
+                "confirmed_by": confirmation["confirmed_by"],
+                "confirmed_at": confirmation["confirmed_at"],
+                "confirmation": copy.deepcopy(confirmation),
+            }
+        )
     _validate_payload(record, "gate")
 
     qa = _directory(project / "qa", "QA directory")
@@ -577,6 +604,7 @@ def _parser() -> argparse.ArgumentParser:
     gate.add_argument("--confirmer")
     gate.add_argument("--artifact-hash", action="append", default=[])
     gate.add_argument("--note", default="")
+    gate.add_argument("--confirmation-file", type=_absolute_cli_path)
 
     stale = subparsers.add_parser("stale")
     stale.add_argument("project_root", type=_absolute_cli_path)
@@ -606,6 +634,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             result = project / "iterations" / version / "state/iteration.json"
         elif args.command == "gate":
+            confirmation = (
+                load_and_validate(
+                    _regular_file(args.confirmation_file, "confirmation file"),
+                    kind="gate-confirmation",
+                )
+                if args.confirmation_file is not None
+                else None
+            )
             record_gate(
                 project,
                 gate_id=args.gate_id,
@@ -613,6 +649,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 confirmer=args.confirmer,
                 artifact_hashes=args.artifact_hash,
                 note=args.note,
+                confirmation=confirmation,
             )
             result = project / "qa/gates.json"
         else:
