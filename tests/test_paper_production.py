@@ -24,6 +24,8 @@ from paper_production import (  # noqa: E402
     _copy_selected_template,
     _write_new_bytes,
     produce_paper,
+    recover_paper_publication,
+    render_paper_pages,
     select_template,
 )
 import paper_production  # noqa: E402
@@ -628,6 +630,31 @@ class PaperProductionTests(unittest.TestCase):
         compiler.chmod(compiler.stat().st_mode | stat.S_IXUSR)
         return compiler
 
+    def make_renderer(self, *, exit_code: int = 0, write_pages: bool = True) -> Path:
+        renderer = self.root / "pdftoppm"
+        source = self.root / "renderer-page.png"
+        write_render_png(source)
+        renderer.write_text(
+            "#!/usr/bin/env python3\n"
+            "import pathlib, shutil, sys\n"
+            "args = sys.argv[1:]\n"
+            "if args == ['-v']:\n"
+            "    print('fixture-renderer 1.0')\n"
+            "    raise SystemExit(0)\n"
+            "pdf = pathlib.Path(args[3])\n"
+            "out = pathlib.Path(args[4]).parent\n"
+            "(out / 'renderer-args.txt').write_text(' '.join(args) + '\\n')\n"
+            f"write_pages = {write_pages!r}\n"
+            "if write_pages:\n"
+            "    out.mkdir(parents=True, exist_ok=True)\n"
+            "    source = pathlib.Path(__file__).with_name('renderer-page.png')\n"
+            "    for page in range(1, 27): shutil.copyfile(source, out / f'page-{page:03d}.png')\n"
+            f"raise SystemExit({exit_code})\n",
+            encoding="utf-8",
+        )
+        renderer.chmod(renderer.stat().st_mode | stat.S_IXUSR)
+        return renderer
+
     def environment_manifest(
         self,
         project: Path,
@@ -1096,6 +1123,8 @@ class PaperProductionTests(unittest.TestCase):
 
     def prepare_visual_finalization(
         self,
+        *,
+        render: bool = True,
     ) -> tuple[Path, Path, Path, Path, Path, dict[str, object]]:
         project, content = self.make_project()
         compiler = self.make_compiler()
@@ -1115,42 +1144,10 @@ class PaperProductionTests(unittest.TestCase):
         )
         paper = project / "iterations/v001/paper"
         request = paper / "visual_review_request.json"
-        render_dir = project / "qa" / f"render-{project.name}"
-        render_dir.mkdir()
-        pages: list[dict[str, object]] = []
-        for page_number in range(1, 27):
-            image = render_dir / f"page-{page_number:03d}.png"
-            write_render_png(image)
-            pages.append(
-                {
-                    "page": page_number,
-                    "path": image.relative_to(project).as_posix(),
-                    "sha256": sha256_file(image),
-                    "width_px": 3,
-                    "height_px": 2,
-                }
-            )
-        render_manifest = project / "qa" / f"paper-render-{project.name}.json"
-        render_payload = {
-            "schema_version": "1",
-            "manifest_type": "paper_render",
-            "iteration": "v001",
-            "pdf_path": report["pdf"]["path"],
-            "pdf_sha256": report["pdf"]["sha256"],
-            "review_request_path": request.relative_to(project).as_posix(),
-            "review_request_sha256": sha256_file(request),
-            "total_pages": 26,
-            "renderer": {
-                "name": "fixture-renderer",
-                "version": "1.0",
-                "method": "one PNG per compiled PDF page",
-                "command": ["fixture-renderer", "--all-pages", report["pdf"]["path"]],
-            },
-            "pages": pages,
-        }
-        render_manifest.write_text(
-            json.dumps(render_payload, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        render_manifest = paper / "paper_render_manifest.json"
+        if render:
+            renderer = self.make_renderer()
+            render_paper_pages(project, "v001", renderer=renderer)
         review = project / "qa/paper-visual-review.json"
         review_payload = {
             "schema_version": "1",
@@ -1158,8 +1155,7 @@ class PaperProductionTests(unittest.TestCase):
             "iteration": "v001",
             "status": "pass",
             "pdf_sha256": report["pdf"]["sha256"],
-            "render_manifest_path": render_manifest.relative_to(project).as_posix(),
-            "render_manifest_sha256": sha256_file(render_manifest),
+            "render_manifest_sha256": sha256_file(render_manifest) if render else "0" * 64,
             "page_coverage": {"start": 1, "end": 26, "pages": 26},
             "checklist": {
                 "blank_pages": "pass",
@@ -1171,10 +1167,40 @@ class PaperProductionTests(unittest.TestCase):
             "reviewer": "fixture-reviewer",
             "reviewed_at": "2026-08-28T12:00:00Z",
         }
-        review.write_text(
-            json.dumps(review_payload, sort_keys=True) + "\n", encoding="utf-8"
-        )
+        if render:
+            review.write_text(
+                json.dumps(review_payload, sort_keys=True) + "\n", encoding="utf-8"
+            )
         return project, compiler, request, render_manifest, review, report
+
+    def test_render_api_owns_canonical_manifest_and_exact_pdf_provenance(self) -> None:
+        project, _, request, _, review, candidate = self.prepare_visual_finalization()
+        paper = project / "iterations/v001/paper"
+        synthetic = project / "qa/synthetic-render.json"
+        synthetic.write_text("{}\n", encoding="utf-8")
+        renderer = self.make_renderer()
+        with self.assertRaises(FileExistsError):
+            render_paper_pages(project, "v001", renderer=renderer)
+        self.assertTrue((paper / "paper_render_manifest.json").is_file())
+        args_text = next((paper / "rendered-pages").glob("renderer-args.txt")).read_text()
+        self.assertIn(str(paper / "paper.pdf"), args_text)
+        self.assertIn("-r 200", args_text)
+        self.assertTrue(request.is_file())
+        self.assertFalse(candidate["submission_ready"])
+        review_payload = json.loads(review.read_text(encoding="utf-8"))
+        review_payload["render_manifest_path"] = synthetic.relative_to(project).as_posix()
+        review.write_text(json.dumps(review_payload, sort_keys=True) + "\n", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            paper_production.finalize_paper(project, "v001", review)
+
+    def test_render_api_failure_stays_non_ready_without_canonical_manifest(self) -> None:
+        project, _, _, _, _, candidate = self.prepare_visual_finalization(render=False)
+        renderer = self.make_renderer(exit_code=7, write_pages=False)
+        paper = project / "iterations/v001/paper"
+        with self.assertRaises(ValueError):
+            render_paper_pages(project, "v001", renderer=renderer)
+        self.assertFalse((paper / "paper_render_manifest.json").exists())
+        self.assertFalse(candidate["submission_ready"])
 
     def test_compile_render_review_finalize_is_immutable_and_does_not_recompile(self) -> None:
         project, compiler, request, render_manifest, review, candidate = (
@@ -1305,6 +1331,40 @@ class PaperProductionTests(unittest.TestCase):
                 compiler=compiler,
             )
         self.assertEqual("old evidence\n", sentinel.read_text(encoding="utf-8"))
+
+    def test_review_request_publish_failure_is_recoverable_without_recompile(self) -> None:
+        project, content = self.make_project()
+        compiler = self.make_compiler()
+        environment = self.environment_manifest(project, compiler)
+        original = paper_production._write_new_json
+        manifest_path = project / "iterations/v001/paper/paper_manifest.json"
+
+        def fail_request(path: Path, payload: object) -> None:
+            if path.name == "visual_review_request.json":
+                raise OSError("injected request publish failure")
+            original(path, payload)
+
+        with patch("paper_production._write_new_json", side_effect=fail_request):
+            with self.assertRaises(OSError):
+                produce_paper(
+                    project,
+                    "v001",
+                    content,
+                    environment,
+                    template_path=None,
+                    compiler=compiler,
+                )
+        self.assertTrue(manifest_path.is_file())
+        manifest_bytes = manifest_path.read_bytes()
+        self.assertFalse((manifest_path.parent / "visual_review_request.json").exists())
+        recovered = recover_paper_publication(project, "v001")
+        self.assertEqual("paper_visual_review_request", recovered["manifest_type"])
+        request_path = manifest_path.parent / "visual_review_request.json"
+        self.assertTrue(request_path.is_file())
+        self.assertEqual(manifest_bytes, manifest_path.read_bytes())
+        request_path.write_text(request_path.read_text() + "tampered", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            recover_paper_publication(project, "v001")
 
 
 if __name__ == "__main__":

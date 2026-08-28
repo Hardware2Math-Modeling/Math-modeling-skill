@@ -73,15 +73,23 @@ def write_xref_stream_pdf(
     free_object: int | None = None,
     wrong_offset_object: int | None = None,
     root_is_font: bool = False,
+    root_variant: str | None = None,
 ) -> None:
     """Write a one-page PDF 1.5 file whose cross-reference is a stream."""
 
+    root_value = (
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+        if root_is_font
+        else b"<< /Type /Catalog /Pages 2 0 R >>"
+    )
+    if root_variant == "nested":
+        root_value = b"<< /Type /Font /Metadata << /Type /Catalog >> >>"
+    elif root_variant == "string":
+        root_value = b"<< /Type /Font /Subject (/Type /Catalog) >>"
+    elif root_variant == "comment":
+        root_value = b"<< /Type /Font % /Type /Catalog\n >>"
     values = [
-        (
-            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
-            if root_is_font
-            else b"<< /Type /Catalog /Pages 2 0 R >>"
-        ),
+        root_value,
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         (
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
@@ -355,6 +363,38 @@ class LatexQATests(unittest.TestCase):
             report = inspect_pdf(pdf, aux_path=aux, log_paths=[])
         self.assertEqual("fail", report["status"])
         self.assertIn("catalog", " ".join(report["failed_checks"]).lower())
+
+    def test_xref_root_catalog_lures_inside_nested_values_strings_and_comments_fail(self) -> None:
+        aux = self.root / "catalog-lures.aux"
+        aux.write_text(
+            "\\newlabel{mm-body-start}{{1}{1}}\n"
+            "\\newlabel{mm-body-end}{{8}{1}}\n",
+            encoding="utf-8",
+        )
+        for variant in ("nested", "string", "comment"):
+            pdf = self.root / f"catalog-lure-{variant}.pdf"
+            write_xref_stream_pdf(pdf, root_variant=variant)
+            with self.subTest(variant=variant):
+                with patch("latex_qa.shutil.which", return_value=None):
+                    report = inspect_pdf(pdf, aux_path=aux, log_paths=[])
+                self.assertEqual("fail", report["status"])
+                self.assertIn("catalog", " ".join(report["failed_checks"]).lower())
+
+    def test_compressed_root_wrong_objstm_member_fails_closed(self) -> None:
+        pdf = self.root / "compressed-root-wrong-member.pdf"
+        aux = self.root / "compressed-root-wrong-member.aux"
+        write_compressed_root_xref_stream_pdf(pdf)
+        data = pdf.read_bytes()
+        data = data.replace(b"/Root 1 0 R", b"/Root 2 0 R", 1)
+        pdf.write_bytes(data)
+        aux.write_text(
+            "\\newlabel{mm-body-start}{{1}{1}}\n"
+            "\\newlabel{mm-body-end}{{8}{1}}\n",
+            encoding="utf-8",
+        )
+        with patch("latex_qa.shutil.which", return_value=None):
+            report = inspect_pdf(pdf, aux_path=aux, log_paths=[])
+        self.assertEqual("fail", report["status"])
 
     def test_xref_stream_compressed_root_resolves_exact_catalog_object(self) -> None:
         aux = self.root / "compressed-root.aux"

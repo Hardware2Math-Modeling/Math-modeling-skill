@@ -166,6 +166,92 @@ def _compressed_object(
     return decoded[first + start : first + end], None
 
 
+def _skip_pdf_ws(data: bytes, cursor: int) -> int:
+    while cursor < len(data):
+        if data[cursor] in b" \t\r\n\f\x00":
+            cursor += 1
+        elif data[cursor] == ord("%"):
+            newline = data.find(b"\n", cursor + 1)
+            cursor = len(data) if newline < 0 else newline + 1
+        else:
+            break
+    return cursor
+
+
+def _pdf_token(data: bytes, cursor: int) -> tuple[str, bytes | None, int]:
+    cursor = _skip_pdf_ws(data, cursor)
+    if cursor >= len(data):
+        return "eof", None, cursor
+    if data.startswith(b"<<", cursor):
+        return "dict_start", None, cursor + 2
+    if data.startswith(b">>", cursor):
+        return "dict_end", None, cursor + 2
+    if data[cursor] in b"[]":
+        return chr(data[cursor]), None, cursor + 1
+    if data[cursor] == ord("("):
+        cursor += 1
+        depth = 1
+        while cursor < len(data) and depth:
+            if data[cursor] == ord("\\"):
+                cursor += 2
+                continue
+            if data[cursor] == ord("("):
+                depth += 1
+            elif data[cursor] == ord(")"):
+                depth -= 1
+            cursor += 1
+        return "literal", None, cursor
+    if data[cursor] == ord("<"):
+        end = data.find(b">", cursor + 1)
+        return "hex", None, len(data) if end < 0 else end + 1
+    if data[cursor] == ord("/"):
+        end = cursor + 1
+        while end < len(data) and data[end] not in b" \t\r\n\f\x00[]()<>{}/%":
+            end += 1
+        return "name", data[cursor + 1 : end], end
+    end = cursor
+    while end < len(data) and data[end] not in b" \t\r\n\f\x00[]()<>{}/%":
+        end += 1
+    return "atom", data[cursor:end], end
+
+
+def _skip_pdf_value(data: bytes, cursor: int, token: tuple[str, bytes | None, int]) -> int:
+    kind, _, cursor = token
+    if kind == "dict_start":
+        while True:
+            key = _pdf_token(data, cursor)
+            if key[0] in ("dict_end", "eof"):
+                return key[2]
+            cursor = key[2]
+            cursor = _skip_pdf_value(data, cursor, _pdf_token(data, cursor))
+    if kind == "[":
+        while True:
+            value = _pdf_token(data, cursor)
+            if value[0] in ("]", "eof"):
+                return value[2]
+            cursor = _skip_pdf_value(data, cursor, value)
+    return cursor
+
+
+def _is_catalog_dictionary(data: bytes) -> bool:
+    first = _pdf_token(data, 0)
+    if first[0] != "dict_start":
+        return False
+    cursor = first[2]
+    while True:
+        key = _pdf_token(data, cursor)
+        if key[0] in ("dict_end", "eof"):
+            return False
+        cursor = key[2]
+        value = _pdf_token(data, cursor)
+        if value[0] in ("dict_end", "eof"):
+            return False
+        if key[0] == "name" and key[1] == b"Type":
+            if value[0] == "name" and value[1] == b"Catalog":
+                return True
+        cursor = _skip_pdf_value(data, cursor, value)
+
+
 def _pdf_objects(data: bytes) -> tuple[dict[int, tuple[int, bytes]], list[str]]:
     errors: list[str] = []
     if not data.startswith(b"%PDF-"):
@@ -296,7 +382,7 @@ def _pdf_objects(data: bytes) -> tuple[dict[int, tuple[int, bytes]], list[str]]:
         root_object = direct[1] if direct is not None else None
 
     if root_id is not None:
-        if root_object is None or re.search(rb"/Type\s*/Catalog\b", root_object) is None:
+        if root_object is None or not _is_catalog_dictionary(root_object):
             errors.append("PDF /Root does not resolve to a Catalog object")
 
     if not errors and classic_xref:

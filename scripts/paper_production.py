@@ -26,6 +26,8 @@ from suite_validation import ensure_no_symlink_components
 
 _COMPILER_PRIORITY = ("tectonic", "latexmk", "xelatex")
 _COMPILER_TIMEOUT_SECONDS = 180
+_RENDER_TIMEOUT_SECONDS = 180
+_RENDER_DPI = 200
 _ITERATION_RE = re.compile(r"^v[0-9]{3,}$")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _UPSTREAM_STAGES = {
@@ -1123,6 +1125,147 @@ def _render_png(path: Path) -> tuple[int, int]:
     return width, height
 
 
+def render_paper_pages(
+    project_root: Path,
+    iteration: str,
+    *,
+    renderer: Path,
+) -> dict[str, object]:
+    """Render the immutable candidate PDF with one explicit supported renderer."""
+
+    project = _directory(project_root, "project root")
+    if type(iteration) is not str or _ITERATION_RE.fullmatch(iteration) is None:
+        raise ValueError("iteration must use canonical vNNN form")
+    manifest_path, candidate, request_path, request = _validate_candidate_for_finalization(
+        project, iteration
+    )
+    executable = _regular_file(Path(renderer), "PDF renderer executable")
+    if not os.access(executable, os.X_OK):
+        raise ValueError("PDF renderer executable must be executable")
+    if executable.name != "pdftoppm":
+        raise ValueError("only the explicitly supported pdftoppm renderer is accepted")
+    paper = _directory(project / f"iterations/{iteration}/paper", "active paper directory")
+    render_manifest_path = paper / "paper_render_manifest.json"
+    render_dir = paper / "rendered-pages"
+    if render_manifest_path.exists() or render_manifest_path.is_symlink():
+        raise FileExistsError(f"render manifest already exists: {render_manifest_path}")
+    if render_dir.exists() or render_dir.is_symlink():
+        raise FileExistsError(f"render output directory already exists: {render_dir}")
+    pdf_record = candidate["pdf"]
+    page_qa = candidate["page_qa"]
+    assert type(pdf_record) is dict and type(page_qa) is dict
+    pdf = _project_evidence_file(project, pdf_record["path"], "candidate PDF")
+    before = {
+        "manifest": sha256_file(manifest_path),
+        "request": sha256_file(request_path),
+        "pdf": sha256_file(pdf),
+    }
+    _mkdir_new(render_dir, "render output directory")
+    version = subprocess.run(
+        [str(executable), "-v"],
+        check=False,
+        shell=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=_RENDER_TIMEOUT_SECONDS,
+    )
+    output_prefix = render_dir / "page"
+    command = [
+        str(executable),
+        "-r",
+        str(_RENDER_DPI),
+        "-png",
+        str(pdf),
+        str(output_prefix),
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            shell=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_RENDER_TIMEOUT_SECONDS,
+        )
+    except (OSError, subprocess.TimeoutExpired) as error:
+        raise ValueError(f"controlled PDF renderer failed: {error}") from error
+    log_path = paper / "logs/render.log"
+    log_text = (
+        "version_command: " + json.dumps([str(executable), "-v"]) + "\n"
+        + "version_exit_code: " + str(version.returncode) + "\n"
+        + version.stdout + version.stderr
+        + "render_command: " + json.dumps(command) + "\n"
+        + "render_exit_code: " + str(completed.returncode) + "\n"
+        + completed.stdout + completed.stderr
+    )
+    _write_new_bytes(log_path, log_text.encode("utf-8"), "render log")
+    after = {
+        "manifest": sha256_file(manifest_path),
+        "request": sha256_file(request_path),
+        "pdf": sha256_file(pdf),
+    }
+    if after != before:
+        raise ValueError("candidate manifest, request, or PDF changed during rendering")
+    if version.returncode != 0 or not (version.stdout + version.stderr).strip():
+        raise ValueError("controlled PDF renderer version probe failed")
+    if completed.returncode != 0:
+        raise ValueError("controlled PDF renderer exited nonzero")
+    total_pages = page_qa["total_pages"]
+    pngs = sorted(
+        path for path in render_dir.iterdir() if path.suffix.lower() == ".png"
+    )
+    if len(pngs) != total_pages:
+        raise ValueError("controlled PDF renderer did not produce exactly one PNG per page")
+    pages: list[dict[str, object]] = []
+    for page_number, image in enumerate(pngs, start=1):
+        width, height = _render_png(image)
+        pages.append(
+            {
+                "page": page_number,
+                "path": image.relative_to(project).as_posix(),
+                "sha256": sha256_file(image),
+                "width_px": width,
+                "height_px": height,
+            }
+        )
+    payload = {
+        "schema_version": "1",
+        "manifest_type": "paper_render",
+        "iteration": iteration,
+        "generator": {
+            "name": "paper_production",
+            "version": "1",
+            "method": "controlled_renderer",
+            "command": command,
+            "exit_code": completed.returncode,
+            "log_path": log_path.relative_to(project).as_posix(),
+            "log_sha256": sha256_file(log_path),
+        },
+        "renderer": {
+            "path": executable.relative_to(project).as_posix()
+            if executable.is_relative_to(project)
+            else str(executable),
+            "sha256": sha256_file(executable),
+            "version_command": [str(executable), "-v"],
+            "version_output": (version.stdout + version.stderr).strip(),
+        },
+        "pdf_path": pdf_record["path"],
+        "pdf_sha256": pdf_record["sha256"],
+        "candidate_manifest_path": manifest_path.relative_to(project).as_posix(),
+        "candidate_manifest_sha256": before["manifest"],
+        "review_request_path": request_path.relative_to(project).as_posix(),
+        "review_request_sha256": before["request"],
+        "total_pages": total_pages,
+        "pages": pages,
+    }
+    _write_new_json(render_manifest_path, payload)
+    return payload
+
+
 def _validate_candidate_for_finalization(
     project: Path, iteration: str
 ) -> tuple[Path, dict[str, object], Path, dict[str, object]]:
@@ -1304,7 +1447,6 @@ def finalize_paper(
             "iteration",
             "status",
             "pdf_sha256",
-            "render_manifest_path",
             "render_manifest_sha256",
             "page_coverage",
             "checklist",
@@ -1345,7 +1487,9 @@ def finalize_paper(
     if any(value != "pass" for value in checklist.values()):
         raise ValueError("every visual review checklist item must explicitly pass")
     render_file = _project_evidence_file(
-        project, review.get("render_manifest_path"), "render manifest"
+        project,
+        f"iterations/{iteration}/paper/paper_render_manifest.json",
+        "canonical render manifest",
     )
     if review.get("render_manifest_sha256") != sha256_file(render_file):
         raise ValueError("visual review render-manifest hash is stale")
@@ -1356,8 +1500,12 @@ def finalize_paper(
             "schema_version",
             "manifest_type",
             "iteration",
+            "generator",
+            "renderer",
             "pdf_path",
             "pdf_sha256",
+            "candidate_manifest_path",
+            "candidate_manifest_sha256",
             "review_request_path",
             "review_request_sha256",
             "total_pages",
@@ -1370,6 +1518,9 @@ def finalize_paper(
         render.get("schema_version") != "1"
         or render.get("manifest_type") != "paper_render"
         or render.get("iteration") != iteration
+        or render.get("candidate_manifest_path")
+        != f"iterations/{iteration}/paper/paper_manifest.json"
+        or render.get("candidate_manifest_sha256") != sha256_file(manifest_path)
         or render.get("pdf_path") != pdf_record["path"]
         or render.get("pdf_sha256") != pdf_record["sha256"]
         or render.get("review_request_path")
@@ -1378,19 +1529,46 @@ def finalize_paper(
         or render.get("total_pages") != total_pages
     ):
         raise ValueError("render manifest is stale or not bound to the review request/PDF")
-    renderer = _exact_keys(
-        render.get("renderer"), {"name", "version", "method", "command"}, "renderer"
+    generator = _exact_keys(
+        render.get("generator"),
+        {"name", "version", "method", "command", "exit_code", "log_path", "log_sha256"},
+        "render generator",
     )
-    if any(
-        type(renderer.get(field)) is not str or not str(renderer[field]).strip()
-        for field in ("name", "version", "method")
-    ):
-        raise ValueError("renderer identity/method must be nonempty")
-    command = renderer.get("command")
+    if generator.get("name") != "paper_production" or generator.get("method") != "controlled_renderer":
+        raise ValueError("render manifest generator is not production-controlled")
+    if type(generator.get("version")) is not str or not generator["version"].strip():
+        raise ValueError("render generator version must be nonempty")
+    if generator.get("exit_code") != 0:
+        raise ValueError("render generator exit code must be zero")
+    command = generator.get("command")
     if type(command) is not list or not command or any(
         type(item) is not str or not item for item in command
     ):
-        raise ValueError("renderer command must be an auditable string array")
+        raise ValueError("render generator command must be an auditable string array")
+    log_file = _project_evidence_file(project, generator.get("log_path"), "render log")
+    if generator.get("log_sha256") != sha256_file(log_file):
+        raise ValueError("render log hash is stale")
+    renderer = _exact_keys(
+        render.get("renderer"),
+        {"path", "sha256", "version_command", "version_output"},
+        "renderer",
+    )
+    renderer_path_value = renderer.get("path")
+    if type(renderer_path_value) is not str or not renderer_path_value.strip():
+        raise ValueError("renderer path must be nonempty")
+    renderer_path = Path(renderer_path_value)
+    if not renderer_path.is_absolute():
+        renderer_path = project / safe_relative_path(renderer_path_value, "renderer path")
+    renderer_executable = _regular_file(renderer_path, "renderer executable")
+    if not os.access(renderer_executable, os.X_OK) or renderer.get("sha256") != sha256_file(renderer_executable):
+        raise ValueError("renderer executable hash or permissions are stale")
+    version_command = renderer.get("version_command")
+    if type(version_command) is not list or not version_command or any(
+        type(item) is not str or not item for item in version_command
+    ):
+        raise ValueError("renderer version command must be an auditable string array")
+    if type(renderer.get("version_output")) is not str or not renderer["version_output"].strip():
+        raise ValueError("renderer version output must be nonempty")
     pages = render.get("pages")
     if type(pages) is not list or len(pages) != total_pages:
         raise ValueError("render manifest must contain exactly one PNG per PDF page")
@@ -1457,6 +1635,100 @@ def finalize_paper(
     }
     _write_new_json(finalization_path, finalization)
     return finalization
+
+
+def recover_paper_publication(project_root: Path, iteration: str) -> dict[str, object]:
+    """Complete an interrupted candidate manifest/request publication without recompiling."""
+
+    project = _directory(project_root, "project root")
+    if type(iteration) is not str or _ITERATION_RE.fullmatch(iteration) is None:
+        raise ValueError("iteration must use canonical vNNN form")
+    current = load_current(project)
+    if current.get("active_iteration") != iteration or current.get("status") == "stale":
+        raise ValueError("paper publication recovery requires the active non-stale iteration")
+    gates = current.get("gates")
+    if type(gates) is not dict or gates.get("gate3") != "confirmed":
+        raise ValueError("Gate 3 must remain confirmed for publication recovery")
+    iteration_root = _directory(project / "iterations" / iteration, "active iteration")
+    _current_validation(iteration_root)
+    _staleness_check(project)
+    paper = _directory(iteration_root / "paper", "active paper directory")
+    manifest_path = _regular_file(paper / "paper_manifest.json", "candidate manifest")
+    manifest = _strict_json(manifest_path, "candidate manifest")
+    if (
+        manifest.get("schema_version") != "1"
+        or manifest.get("manifest_type") != "paper"
+        or manifest.get("iteration") != iteration
+        or manifest.get("status") != "pass"
+        or manifest.get("submission_ready") is not False
+        or manifest.get("failed_checks") != []
+    ):
+        raise ValueError("candidate manifest is not a passing non-ready candidate")
+    page_qa = manifest.get("page_qa")
+    pdf_record = manifest.get("pdf")
+    if (
+        type(page_qa) is not dict
+        or page_qa.get("status") != "pass"
+        or page_qa.get("failed_checks") != []
+        or type(page_qa.get("total_pages")) is not int
+        or page_qa["total_pages"] < 1
+        or type(pdf_record) is not dict
+        or pdf_record.get("path") != f"iterations/{iteration}/paper/paper.pdf"
+    ):
+        raise ValueError("candidate manifest lacks a recoverable passing PDF record")
+    pdf = _project_evidence_file(project, pdf_record["path"], "candidate PDF")
+    if (
+        pdf_record.get("sha256") != sha256_file(pdf)
+        or pdf_record.get("byte_size") != pdf.stat(follow_symlinks=False).st_size
+        or page_qa.get("pdf_sha256") != pdf_record.get("sha256")
+    ):
+        raise ValueError("candidate PDF is stale or tampered")
+    readiness = _exact_keys(
+        manifest.get("readiness"),
+        {"status", "authority", "review_request"},
+        "candidate readiness record",
+    )
+    request_relative = f"iterations/{iteration}/paper/visual_review_request.json"
+    authority_relative = f"iterations/{iteration}/paper/paper_finalization.json"
+    if readiness != {
+        "status": "pending_visual_review",
+        "authority": authority_relative,
+        "review_request": request_relative,
+    }:
+        raise ValueError("candidate readiness record is not recoverable")
+    request_path = project / request_relative
+    request_payload = {
+        "schema_version": "1",
+        "manifest_type": "paper_visual_review_request",
+        "iteration": iteration,
+        "created_at": utc_now(),
+        "status": "pending",
+        "candidate_manifest": {
+            "path": f"iterations/{iteration}/paper/paper_manifest.json",
+            "sha256": sha256_file(manifest_path),
+        },
+        "candidate_pdf": {
+            "path": pdf_record["path"],
+            "sha256": pdf_record["sha256"],
+            "total_pages": page_qa["total_pages"],
+        },
+        "required_page_coverage": {
+            "start": 1,
+            "end": page_qa["total_pages"],
+            "pages": page_qa["total_pages"],
+        },
+        "finalization_authority": authority_relative,
+    }
+    if request_path.exists() or request_path.is_symlink():
+        existing = _strict_json(request_path, "visual review request")
+        if existing.get("manifest_type") != "paper_visual_review_request" or existing != {
+            **request_payload,
+            "created_at": existing.get("created_at"),
+        }:
+            raise ValueError("existing visual review request is mismatched or tampered")
+        return existing
+    _write_new_json(request_path, request_payload)
+    return request_payload
 
 
 def produce_paper(
@@ -1674,4 +1946,10 @@ def produce_paper(
     return report
 
 
-__all__ = ["finalize_paper", "produce_paper", "select_template"]
+__all__ = [
+    "finalize_paper",
+    "produce_paper",
+    "recover_paper_publication",
+    "render_paper_pages",
+    "select_template",
+]
