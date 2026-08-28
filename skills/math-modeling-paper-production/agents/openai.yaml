@@ -1,6 +1,6 @@
 interface:
-  display_name: "Modeling Paper Production"
-  short_description: "Compile and inspect modeling paper artifacts"
-  default_prompt: "Use $math-modeling-paper-production to assemble and verify this requested modeling paper."
+  display_name: "Chinese Modeling Paper Production"
+  short_description: "Compile and audit evidence-backed modeling PDFs"
+  default_prompt: "Use $math-modeling-paper-production to compile and audit the current frozen Chinese modeling paper."
 policy:
   allow_implicit_invocation: true
