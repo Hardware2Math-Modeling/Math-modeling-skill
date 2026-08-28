@@ -1449,16 +1449,16 @@ def _render_png(path: Path) -> tuple[int, int]:
     return width, height
 
 
-def _new_render_attempt(
+def _load_render_attempts(
     project: Path,
     paper: Path,
     iteration: str,
-) -> tuple[str, Path]:
+) -> list[tuple[int, Path, Path, dict[str, object]]]:
     root = paper / "render-attempts"
     if not root.exists() and not root.is_symlink():
-        _mkdir_new(root, "render attempts root")
+        return []
     root = _directory(root, "render attempts root")
-    numbered: list[tuple[int, Path]] = []
+    numbered: list[tuple[int, Path, Path, dict[str, object]]] = []
     for entry in root.iterdir():
         match = _RENDER_ATTEMPT_RE.fullmatch(entry.name)
         if match is None:
@@ -1496,33 +1496,322 @@ def _new_render_attempt(
             },
             "prior render attempt record",
         )
-        log = _exact_keys(
-            record.get("log"), {"path", "sha256"}, "prior render attempt log"
-        )
-        expected_log = f"iterations/{iteration}/paper/render-attempts/{entry.name}/render.log"
-        log_path = _project_evidence_file(project, log.get("path"), "prior render attempt log")
+        _utc_timestamp(record.get("created_at"), "prior render attempt created_at")
         if (
             record.get("schema_version") != "1"
             or record.get("manifest_type") != "paper_render_attempt"
             or record.get("iteration") != iteration
             or record.get("attempt_id") != entry.name
-            or record.get("status") != "failed"
-            or type(record.get("error")) is not str
-            or not record["error"]
-            or log.get("path") != expected_log
-            or log.get("sha256") != sha256_file(log_path)
         ):
-            raise ValueError("prior render attempt is incomplete, successful, or tampered")
-        _utc_timestamp(record.get("created_at"), "prior render attempt created_at")
-        numbered.append((number, attempt))
+            raise ValueError("prior render attempt identity is mismatched or tampered")
+        numbered.append((number, attempt, record_path, record))
     numbered.sort(key=lambda item: item[0])
-    if [number for number, _ in numbered] != list(range(1, len(numbered) + 1)):
+    if [number for number, *_ in numbered] != list(range(1, len(numbered) + 1)):
         raise ValueError("render attempt sequence has a gap or duplicate")
+    return numbered
+
+
+def _render_attempt_log(
+    project: Path,
+    iteration: str,
+    attempt: Path,
+    record: dict[str, object],
+) -> tuple[Path, str, str]:
+    attempt_id = record.get("attempt_id")
+    log = _exact_keys(
+        record.get("log"), {"path", "sha256"}, "prior render attempt log"
+    )
+    expected_log = f"iterations/{iteration}/paper/render-attempts/{attempt_id}/render.log"
+    log_path = _project_evidence_file(project, log.get("path"), "prior render attempt log")
+    if log_path != attempt / "render.log" or log.get("path") != expected_log:
+        raise ValueError("prior render attempt log path is not canonical")
+    log_hash = sha256_file(log_path)
+    if log.get("sha256") != log_hash:
+        raise ValueError("prior render attempt log hash is stale or tampered")
+    try:
+        log_text = log_path.read_text(encoding="utf-8")
+    except (OSError, UnicodeError) as error:
+        raise ValueError("prior render attempt log is not readable UTF-8") from error
+    header = (
+        f"attempt_id: {attempt_id}\n"
+        f"created_at: {record.get('created_at')}\n"
+        "version_command: "
+        + json.dumps(record.get("version_command"))
+        + "\n"
+    )
+    status = record.get("status")
+    error = record.get("error")
+    trailer = f"attempt_status: {status}\nerror: {error or ''}\n"
+    exit_code = record.get("exit_code")
+    if type(exit_code) is int:
+        render_exit_code = str(exit_code)
+    elif exit_code is None:
+        render_exit_code = "not_started"
+    else:
+        raise ValueError("prior render attempt exit code is invalid")
+    render_command_record = (
+        "render_command: "
+        + json.dumps(record.get("render_command"))
+        + "\nrender_exit_code: "
+        + render_exit_code
+        + "\n"
+    )
+    if (
+        not log_text.startswith(header)
+        or render_command_record not in log_text
+        or not log_text.endswith(trailer)
+    ):
+        raise ValueError("prior render attempt log identity/status is mismatched or tampered")
+    return log_path, log_text, log_hash
+
+
+def _validate_failed_render_attempt(
+    project: Path,
+    iteration: str,
+    attempt: Path,
+    record: dict[str, object],
+) -> None:
+    if (
+        record.get("status") != "failed"
+        or type(record.get("error")) is not str
+        or not record["error"]
+        or record.get("pages") != []
+    ):
+        raise ValueError("prior render attempt is incomplete, successful, or tampered")
+    _render_attempt_log(project, iteration, attempt, record)
+
+
+def _new_render_attempt(
+    project: Path,
+    paper: Path,
+    iteration: str,
+) -> tuple[str, Path]:
+    root = paper / "render-attempts"
+    if not root.exists() and not root.is_symlink():
+        _mkdir_new(root, "render attempts root")
+    root = _directory(root, "render attempts root")
+    numbered = _load_render_attempts(project, paper, iteration)
+    for _, attempt, _, record in numbered:
+        _validate_failed_render_attempt(project, iteration, attempt, record)
     next_number = len(numbered) + 1
     attempt_id = f"attempt-{next_number:03d}"
     attempt = root / attempt_id
     _mkdir_new(attempt, "render attempt directory")
     return attempt_id, attempt
+
+
+def _bound_render_attempt_command(
+    *,
+    attempt: Path,
+    record: dict[str, object],
+    expected_environment: dict[str, str],
+    expected_candidate: dict[str, str],
+    renderer_evidence: dict[str, object],
+    executable: Path,
+    pdf: Path,
+) -> list[str]:
+    if set(path.name for path in attempt.iterdir()) != {
+        "pages",
+        "render.log",
+        "attempt.json",
+    }:
+        raise ValueError("render attempt contains unexpected top-level entries")
+    candidate_record = _exact_keys(
+        record.get("candidate"),
+        {"manifest_sha256", "request_sha256", "pdf_sha256"},
+        "render attempt candidate",
+    )
+    expected_command = [
+        str(executable),
+        "-r",
+        str(_RENDER_DPI),
+        "-png",
+        str(pdf),
+        str(attempt / "pages/page"),
+    ]
+    if (
+        record.get("environment") != expected_environment
+        or record.get("renderer") != renderer_evidence
+        or candidate_record != expected_candidate
+        or record.get("version_command") != [str(executable), "-v"]
+        or record.get("render_command") != expected_command
+    ):
+        raise ValueError("render attempt binding is stale or tampered")
+    return expected_command
+
+
+def _recover_render_manifest(
+    *,
+    project: Path,
+    paper: Path,
+    iteration: str,
+    render_manifest_path: Path,
+    manifest_path: Path,
+    candidate: dict[str, object],
+    request_path: Path,
+    environment_path: Path,
+    environment_hash: str,
+    renderer_evidence: dict[str, object],
+    executable: Path,
+    pdf: Path,
+    immutable_hashes: dict[str, str],
+) -> dict[str, object] | None:
+    attempts = _load_render_attempts(project, paper, iteration)
+    pass_indexes = [
+        index
+        for index, (_, _, _, record) in enumerate(attempts)
+        if record.get("status") == "pass"
+    ]
+    if not pass_indexes:
+        return None
+    if len(pass_indexes) != 1 or pass_indexes[0] != len(attempts) - 1:
+        raise ValueError("render recovery requires exactly one final successful attempt")
+    expected_environment = {
+        "path": environment_path.relative_to(project).as_posix(),
+        "sha256": environment_hash,
+    }
+    expected_candidate = {
+        "manifest_sha256": immutable_hashes["manifest"],
+        "request_sha256": immutable_hashes["request"],
+        "pdf_sha256": immutable_hashes["pdf"],
+    }
+    for _, prior_attempt, _, prior_record in attempts[:-1]:
+        _bound_render_attempt_command(
+            attempt=prior_attempt,
+            record=prior_record,
+            expected_environment=expected_environment,
+            expected_candidate=expected_candidate,
+            renderer_evidence=renderer_evidence,
+            executable=executable,
+            pdf=pdf,
+        )
+        _validate_failed_render_attempt(project, iteration, prior_attempt, prior_record)
+
+    _, attempt, attempt_path, record = attempts[-1]
+    expected_command = _bound_render_attempt_command(
+        attempt=attempt,
+        record=record,
+        expected_environment=expected_environment,
+        expected_candidate=expected_candidate,
+        renderer_evidence=renderer_evidence,
+        executable=executable,
+        pdf=pdf,
+    )
+    if (
+        record.get("status") != "pass"
+        or record.get("error") is not None
+        or record.get("exit_code") != 0
+    ):
+        raise ValueError("successful render attempt evidence is stale or tampered")
+    log_path, log_text, log_hash = _render_attempt_log(
+        project, iteration, attempt, record
+    )
+    version_output = renderer_evidence.get("version_output")
+    if type(version_output) is not str:
+        raise ValueError("successful render attempt version evidence is invalid")
+    expected_log_prefix = (
+        f"attempt_id: {record['attempt_id']}\n"
+        f"created_at: {record['created_at']}\n"
+        + "version_command: "
+        + json.dumps([str(executable), "-v"])
+        + "\nversion_exit_code: 0\n"
+        + version_output
+        + "render_command: "
+        + json.dumps(expected_command)
+        + "\nrender_exit_code: 0\n"
+    )
+    if not log_text.startswith(expected_log_prefix):
+        raise ValueError("successful render attempt log/version evidence is mismatched")
+
+    page_qa = candidate.get("page_qa")
+    pdf_record = candidate.get("pdf")
+    if (
+        type(page_qa) is not dict
+        or type(page_qa.get("total_pages")) is not int
+        or type(pdf_record) is not dict
+    ):
+        raise ValueError("candidate page count is invalid for render recovery")
+    total_pages = page_qa["total_pages"]
+    pages_dir = _directory(attempt / "pages", "successful render attempt pages")
+    pages = record.get("pages")
+    if type(pages) is not list or len(pages) != total_pages:
+        raise ValueError("successful render attempt page evidence is incomplete")
+    normalized_pages: list[dict[str, object]] = []
+    observed_pages: list[int] = []
+    observed_paths: set[str] = set()
+    observed_path_order: list[str] = []
+    for index, entry in enumerate(pages):
+        page = _exact_keys(
+            entry,
+            {"page", "path", "sha256", "width_px", "height_px"},
+            f"successful render page {index}",
+        )
+        page_number = page.get("page")
+        if type(page_number) is not int:
+            raise ValueError("successful render page number must be an integer")
+        image = _project_evidence_file(project, page.get("path"), "rendered page PNG")
+        relative_image = image.relative_to(project).as_posix()
+        if (
+            image.parent != pages_dir
+            or image.suffix.lower() != ".png"
+            or relative_image in observed_paths
+        ):
+            raise ValueError("successful render page path is not unique/canonical")
+        observed_paths.add(relative_image)
+        observed_path_order.append(relative_image)
+        if page.get("sha256") != sha256_file(image):
+            raise ValueError("successful render page hash is stale or tampered")
+        width, height = _render_png(image)
+        if page.get("width_px") != width or page.get("height_px") != height:
+            raise ValueError("successful render page dimensions are mismatched")
+        observed_pages.append(page_number)
+        normalized_pages.append(dict(page))
+    directory_png_paths = sorted(
+        _regular_file(path, "successful render attempt PNG")
+        .relative_to(project)
+        .as_posix()
+        for path in pages_dir.iterdir()
+        if path.suffix.lower() == ".png"
+    )
+    if (
+        observed_pages != list(range(1, total_pages + 1))
+        or observed_path_order != sorted(observed_path_order)
+        or directory_png_paths != observed_path_order
+    ):
+        raise ValueError("successful render page coverage is not exact and consecutive")
+
+    payload = {
+        "schema_version": "1",
+        "manifest_type": "paper_render",
+        "iteration": iteration,
+        "attempt": {
+            "id": record["attempt_id"],
+            "path": attempt.relative_to(project).as_posix(),
+            "record_path": attempt_path.relative_to(project).as_posix(),
+            "record_sha256": sha256_file(attempt_path),
+        },
+        "generator": {
+            "name": "paper_production",
+            "version": "1",
+            "method": "controlled_renderer",
+            "command": expected_command,
+            "exit_code": 0,
+            "log_path": log_path.relative_to(project).as_posix(),
+            "log_sha256": log_hash,
+        },
+        "environment": expected_environment,
+        "renderer": renderer_evidence,
+        "pdf_path": pdf_record["path"],
+        "pdf_sha256": pdf_record["sha256"],
+        "candidate_manifest_path": manifest_path.relative_to(project).as_posix(),
+        "candidate_manifest_sha256": immutable_hashes["manifest"],
+        "review_request_path": request_path.relative_to(project).as_posix(),
+        "review_request_sha256": immutable_hashes["request"],
+        "total_pages": total_pages,
+        "pages": normalized_pages,
+    }
+    _write_new_json(render_manifest_path, payload)
+    return payload
 
 
 def render_paper_pages(
@@ -1531,7 +1820,7 @@ def render_paper_pages(
     *,
     renderer: Path,
 ) -> dict[str, object]:
-    """Render the immutable candidate PDF with one explicit supported renderer."""
+    """Render once, or recover one exact unpublished success without rerendering."""
 
     project = _directory(project_root, "project root")
     if type(iteration) is not str or _ITERATION_RE.fullmatch(iteration) is None:
@@ -1555,6 +1844,23 @@ def render_paper_pages(
         "request": sha256_file(request_path),
         "pdf": sha256_file(pdf),
     }
+    recovered = _recover_render_manifest(
+        project=project,
+        paper=paper,
+        iteration=iteration,
+        render_manifest_path=render_manifest_path,
+        manifest_path=manifest_path,
+        candidate=candidate,
+        request_path=request_path,
+        environment_path=environment_path,
+        environment_hash=environment_hash,
+        renderer_evidence=renderer_evidence,
+        executable=executable,
+        pdf=pdf,
+        immutable_hashes=before,
+    )
+    if recovered is not None:
+        return recovered
     attempt_id, attempt = _new_render_attempt(project, paper, iteration)
     pages_dir = attempt / "pages"
     _mkdir_new(pages_dir, "render attempt pages directory")
@@ -1591,6 +1897,7 @@ def render_paper_pages(
         render_stderr = completed.stderr if completed is not None else ""
         log_text = (
             "attempt_id: " + attempt_id + "\n"
+            + "created_at: " + created_at + "\n"
             + "version_command: " + json.dumps([str(executable), "-v"]) + "\n"
             + "version_exit_code: "
             + (str(version.returncode) if version is not None else "not_started")

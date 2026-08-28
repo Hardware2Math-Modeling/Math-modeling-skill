@@ -650,6 +650,9 @@ class PaperProductionTests(unittest.TestCase):
             "import pathlib, shutil, sys\n"
             "args = sys.argv[1:]\n"
             "if args == ['-v']:\n"
+            "    version_counter = pathlib.Path(__file__).with_name('version-count.txt')\n"
+            "    version_count = int(version_counter.read_text()) + 1 if version_counter.exists() else 1\n"
+            "    version_counter.write_text(str(version_count))\n"
             "    print('pdftoppm version 99.0.0', file=sys.stderr)\n"
             "    raise SystemExit(0)\n"
             "pdf = pathlib.Path(args[3])\n"
@@ -1235,6 +1238,40 @@ class PaperProductionTests(unittest.TestCase):
             )
         return project, compiler, renderer, request, render_manifest, review, report
 
+    def prepare_unpublished_render_success(
+        self,
+    ) -> tuple[Path, Path, Path, Path, dict[str, object]]:
+        project, _, renderer, _, render_manifest, _, _ = (
+            self.prepare_visual_finalization(render=False)
+        )
+        original_write_new_json = paper_production._write_new_json
+        unpublished_payload: dict[str, object] | None = None
+
+        def fail_canonical_publish(path: Path, payload: object) -> None:
+            nonlocal unpublished_payload
+            if path == render_manifest:
+                self.assertIsInstance(payload, dict)
+                unpublished_payload = json.loads(json.dumps(payload))
+                raise OSError("injected canonical render manifest publish failure")
+            original_write_new_json(path, payload)
+
+        with patch(
+            "paper_production._write_new_json", side_effect=fail_canonical_publish
+        ):
+            with self.assertRaisesRegex(
+                OSError, "injected canonical render manifest publish failure"
+            ):
+                render_paper_pages(project, "v001", renderer=renderer)
+        attempt = project / "iterations/v001/paper/render-attempts/attempt-001"
+        self.assertEqual(
+            "pass",
+            json.loads((attempt / "attempt.json").read_text(encoding="utf-8"))["status"],
+        )
+        self.assertFalse(render_manifest.exists())
+        self.assertIsNotNone(unpublished_payload)
+        assert unpublished_payload is not None
+        return project, renderer, render_manifest, attempt, unpublished_payload
+
     def test_render_requires_exact_current_preflight_renderer_evidence(self) -> None:
         cases = ("unregistered", "replacement", "different_basename", "manifest_tamper")
         for case in cases:
@@ -1378,6 +1415,292 @@ class PaperProductionTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             render_paper_pages(project, "v001", renderer=renderer)
         self.assertEqual(canonical_bytes, render_manifest.read_bytes())
+
+    def test_render_manifest_publication_failure_recovers_without_rerender(self) -> None:
+        project, renderer, render_manifest, attempt, unpublished_payload = (
+            self.prepare_unpublished_render_success()
+        )
+        paper = project / "iterations/v001/paper"
+        self.assertEqual(
+            "1", (renderer.parent / "render-count.txt").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            "1", (renderer.parent / "version-count.txt").read_text(encoding="utf-8")
+        )
+        immutable_paper_bytes = {
+            path.relative_to(paper).as_posix(): path.read_bytes()
+            for path in paper.rglob("*")
+            if path.is_file()
+        }
+
+        recovered = render_paper_pages(project, "v001", renderer=renderer)
+
+        self.assertEqual(unpublished_payload, recovered)
+        self.assertEqual("attempt-001", recovered["attempt"]["id"])
+        self.assertTrue(render_manifest.is_file())
+        self.assertEqual(
+            "1", (renderer.parent / "render-count.txt").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            "1", (renderer.parent / "version-count.txt").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            immutable_paper_bytes,
+            {
+                path.relative_to(paper).as_posix(): path.read_bytes()
+                for path in paper.rglob("*")
+                if path.is_file() and path != render_manifest
+            },
+        )
+        self.assertEqual(
+            ["attempt-001"],
+            sorted(path.name for path in (paper / "render-attempts").iterdir()),
+        )
+
+    def test_render_manifest_recovery_rejects_tampered_success_state(self) -> None:
+        cases = (
+            "attempt_hash",
+            "timestamp",
+            "log",
+            "page",
+            "extra_page",
+            "page_order",
+            "path",
+            "renderer",
+            "status",
+            "noncanonical_bytes",
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                project, renderer, render_manifest, attempt, _ = (
+                    self.prepare_unpublished_render_success()
+                )
+                attempt_path = attempt / "attempt.json"
+                record = json.loads(attempt_path.read_text(encoding="utf-8"))
+                if case == "attempt_hash":
+                    record["candidate"]["pdf_sha256"] = "0" * 64
+                elif case == "timestamp":
+                    record["created_at"] = "2026-08-28T23:59:59Z"
+                elif case == "log":
+                    (attempt / "render.log").write_text(
+                        (attempt / "render.log").read_text(encoding="utf-8")
+                        + "tampered\n",
+                        encoding="utf-8",
+                    )
+                elif case == "page":
+                    first_page = project / record["pages"][0]["path"]
+                    write_render_png(first_page, width=4)
+                elif case == "extra_page":
+                    first_page = project / record["pages"][0]["path"]
+                    shutil.copyfile(first_page, attempt / "pages/extra.png")
+                elif case == "page_order":
+                    first = record["pages"][0]
+                    second = record["pages"][1]
+                    for key in ("path", "sha256", "width_px", "height_px"):
+                        first[key], second[key] = second[key], first[key]
+                elif case == "path":
+                    record["pages"][0]["path"] = record["candidate"][
+                        "manifest_sha256"
+                    ]
+                elif case == "renderer":
+                    record["renderer"]["version_signature"] = (
+                        "pdftoppm version 0.0.0"
+                    )
+                elif case == "noncanonical_bytes":
+                    attempt_path.write_bytes(attempt_path.read_bytes() + b" ")
+                else:
+                    record["status"] = "failed"
+                    record["error"] = None
+                if case not in (
+                    "log",
+                    "page",
+                    "extra_page",
+                    "noncanonical_bytes",
+                ):
+                    attempt_path.write_text(
+                        json.dumps(
+                            record,
+                            ensure_ascii=False,
+                            sort_keys=True,
+                            indent=2,
+                            allow_nan=False,
+                        )
+                        + "\n",
+                        encoding="utf-8",
+                    )
+
+                with self.assertRaises(ValueError):
+                    render_paper_pages(project, "v001", renderer=renderer)
+                self.assertFalse(render_manifest.exists())
+                self.assertEqual(
+                    "1",
+                    (renderer.parent / "render-count.txt").read_text(encoding="utf-8"),
+                )
+
+    def test_render_manifest_recovery_rejects_nonfinal_or_multiple_success(self) -> None:
+        for mode in ("nonfinal", "multiple"):
+            with self.subTest(mode=mode):
+                project, renderer, render_manifest, first, _ = (
+                    self.prepare_unpublished_render_success()
+                )
+                second = first.parent / "attempt-002"
+                shutil.copytree(first, second)
+                second_record_path = second / "attempt.json"
+                second_record = json.loads(
+                    second_record_path.read_text(encoding="utf-8")
+                )
+                second_record["attempt_id"] = "attempt-002"
+                if mode == "nonfinal":
+                    second_record["status"] = "failed"
+                    second_record["error"] = "synthetic later failure"
+                    second_record["pages"] = []
+                second_record_path.write_text(
+                    json.dumps(
+                        second_record,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        indent=2,
+                        allow_nan=False,
+                    )
+                    + "\n",
+                    encoding="utf-8",
+                )
+
+                with self.assertRaises(ValueError):
+                    render_paper_pages(project, "v001", renderer=renderer)
+                self.assertFalse(render_manifest.exists())
+                self.assertEqual(
+                    "1",
+                    (renderer.parent / "render-count.txt").read_text(encoding="utf-8"),
+                )
+
+    def test_render_manifest_recovery_rejects_tampered_prior_failure(self) -> None:
+        project, _, renderer, _, render_manifest, _, _ = (
+            self.prepare_visual_finalization(render=False, renderer_fail_once=True)
+        )
+        with self.assertRaises(ValueError):
+            render_paper_pages(project, "v001", renderer=renderer)
+        original_write_new_json = paper_production._write_new_json
+
+        def fail_canonical_publish(path: Path, payload: object) -> None:
+            if path == render_manifest:
+                raise OSError("injected canonical render manifest publish failure")
+            original_write_new_json(path, payload)
+
+        with patch(
+            "paper_production._write_new_json", side_effect=fail_canonical_publish
+        ):
+            with self.assertRaisesRegex(
+                OSError, "injected canonical render manifest publish failure"
+            ):
+                render_paper_pages(project, "v001", renderer=renderer)
+
+        first_record_path = (
+            project
+            / "iterations/v001/paper/render-attempts/attempt-001/attempt.json"
+        )
+        first_record = json.loads(first_record_path.read_text(encoding="utf-8"))
+        first_record["candidate"]["manifest_sha256"] = "0" * 64
+        first_record_path.write_text(
+            json.dumps(
+                first_record,
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+                allow_nan=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(ValueError):
+            render_paper_pages(project, "v001", renderer=renderer)
+        self.assertFalse(render_manifest.exists())
+        self.assertEqual(
+            "2", (renderer.parent / "render-count.txt").read_text(encoding="utf-8")
+        )
+
+    def test_render_manifest_recovery_preserves_prior_failure_audit(self) -> None:
+        project, _, renderer, _, render_manifest, _, _ = (
+            self.prepare_visual_finalization(render=False, renderer_fail_once=True)
+        )
+        with self.assertRaises(ValueError):
+            render_paper_pages(project, "v001", renderer=renderer)
+        original_write_new_json = paper_production._write_new_json
+
+        def fail_canonical_publish(path: Path, payload: object) -> None:
+            if path == render_manifest:
+                raise OSError("injected canonical render manifest publish failure")
+            original_write_new_json(path, payload)
+
+        with patch(
+            "paper_production._write_new_json", side_effect=fail_canonical_publish
+        ):
+            with self.assertRaisesRegex(
+                OSError, "injected canonical render manifest publish failure"
+            ):
+                render_paper_pages(project, "v001", renderer=renderer)
+        attempts = project / "iterations/v001/paper/render-attempts"
+        immutable_attempt_bytes = {
+            path.relative_to(attempts).as_posix(): path.read_bytes()
+            for path in attempts.rglob("*")
+            if path.is_file()
+        }
+
+        recovered = render_paper_pages(project, "v001", renderer=renderer)
+
+        self.assertEqual("attempt-002", recovered["attempt"]["id"])
+        self.assertEqual(
+            ["failed", "pass"],
+            [
+                json.loads(
+                    (attempts / f"attempt-{number:03d}/attempt.json").read_text(
+                        encoding="utf-8"
+                    )
+                )["status"]
+                for number in (1, 2)
+            ],
+        )
+        self.assertEqual(
+            immutable_attempt_bytes,
+            {
+                path.relative_to(attempts).as_posix(): path.read_bytes()
+                for path in attempts.rglob("*")
+                if path.is_file()
+            },
+        )
+        self.assertEqual(
+            "2", (renderer.parent / "render-count.txt").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            "2", (renderer.parent / "version-count.txt").read_text(encoding="utf-8")
+        )
+
+    def test_render_manifest_recovery_rejects_existing_divergent_manifest(self) -> None:
+        project, _, renderer, _, render_manifest, _, _ = (
+            self.prepare_visual_finalization()
+        )
+        divergent = json.loads(render_manifest.read_text(encoding="utf-8"))
+        divergent["pdf_sha256"] = "0" * 64
+        render_manifest.write_text(
+            json.dumps(
+                divergent,
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+                allow_nan=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        divergent_bytes = render_manifest.read_bytes()
+
+        with self.assertRaises(FileExistsError):
+            render_paper_pages(project, "v001", renderer=renderer)
+        self.assertEqual(divergent_bytes, render_manifest.read_bytes())
+        self.assertEqual(
+            "1", (renderer.parent / "render-count.txt").read_text(encoding="utf-8")
+        )
 
     def test_concurrent_render_attempt_directory_collision_fails_without_overwrite(self) -> None:
         project, _, renderer, _, render_manifest, _, _ = self.prepare_visual_finalization(
