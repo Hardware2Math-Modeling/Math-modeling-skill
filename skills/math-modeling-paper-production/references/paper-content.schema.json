@@ -1,0 +1,325 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "paper-content.schema.json",
+  "title": "Chinese mathematical-modeling paper content v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "language",
+    "requirement_manifests",
+    "abstract",
+    "keywords",
+    "sections",
+    "symbols",
+    "claims",
+    "figure_references",
+    "table_references",
+    "references",
+    "code_appendix",
+    "ai_use_disclosure",
+    "human_review_records",
+    "supplemental_appendix"
+  ],
+  "properties": {
+    "schema_version": {"const": "1"},
+    "language": {"const": "zh-CN"},
+    "requirement_manifests": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/requirementManifest"}
+    },
+    "abstract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["intro_sentences", "question_paragraphs"],
+      "properties": {
+        "intro_sentences": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 2,
+          "prefixItems": [
+            {"$ref": "#/$defs/nonEmptyString"},
+            {"$ref": "#/$defs/nonEmptyString"}
+          ],
+          "items": false
+        },
+        "question_paragraphs": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/questionParagraph"}
+        }
+      }
+    },
+    "keywords": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/nonEmptyString"}
+    },
+    "sections": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["1", "2", "3", "4", "5", "6", "7", "8"],
+      "properties": {
+        "1": {"$ref": "#/$defs/backgroundSection"},
+        "2": {"$ref": "#/$defs/plainSection"},
+        "3": {"$ref": "#/$defs/plainSection"},
+        "4": {"$ref": "#/$defs/plainSection"},
+        "5": {"$ref": "#/$defs/modelSection"},
+        "6": {"$ref": "#/$defs/plainSection"},
+        "7": {"$ref": "#/$defs/plainSection"},
+        "8": {"$ref": "#/$defs/plainSection"}
+      }
+    },
+    "symbols": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["symbol", "description", "unit"],
+        "properties": {
+          "symbol": {"$ref": "#/$defs/nonEmptyString"},
+          "description": {"$ref": "#/$defs/nonEmptyString"},
+          "unit": {"$ref": "#/$defs/nonEmptyString"}
+        }
+      }
+    },
+    "claims": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "question_id", "claim_id", "statement", "source_path", "source_hash", "important"
+        ],
+        "properties": {
+          "question_id": {"$ref": "#/$defs/questionId"},
+          "claim_id": {"$ref": "#/$defs/nonEmptyString"},
+          "statement": {"$ref": "#/$defs/nonEmptyString"},
+          "source_path": {"$ref": "#/$defs/relativePath"},
+          "source_hash": {"$ref": "#/$defs/sha256"},
+          "important": {"type": "boolean"}
+        }
+      }
+    },
+    "figure_references": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/figureReference"}
+    },
+    "table_references": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/tableReference"}
+    },
+    "references": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/referenceEntry"}
+    },
+    "code_appendix": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/codeEntry"}
+    },
+    "ai_use_disclosure": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/aiEntry"}
+    },
+    "human_review_records": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/reviewEntry"}
+    },
+    "supplemental_appendix": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/supplementEntry"}
+    },
+    "english_abstract": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "keywords"],
+      "properties": {
+        "text": {"$ref": "#/$defs/nonEmptyString"},
+        "keywords": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/nonEmptyString"}
+        }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {"required": ["english_abstract"]},
+      "then": {
+        "properties": {
+          "requirement_manifests": {"minItems": 1}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "nonEmptyString": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "questionId": {"type": "string", "pattern": "^Q[1-9][0-9]*$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "relativePath": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*\\\\)(?!.*(?:^|/)\\.\\.?(?:/|$)).+"
+    },
+    "questionParagraph": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["question_id", "leading_summary", "modeling_steps", "answer"],
+      "properties": {
+        "question_id": {"$ref": "#/$defs/questionId"},
+        "leading_summary": {"$ref": "#/$defs/nonEmptyString"},
+        "modeling_steps": {"$ref": "#/$defs/nonEmptyString"},
+        "answer": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    },
+    "plainSubsection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "content"],
+      "properties": {
+        "title": {"$ref": "#/$defs/nonEmptyString"},
+        "content": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    },
+    "backgroundSection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "subsections"],
+      "properties": {
+        "title": {"const": "问题背景与重述"},
+        "subsections": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["1.1", "1.2"],
+          "properties": {
+            "1.1": {"$ref": "#/$defs/plainSubsection"},
+            "1.2": {"$ref": "#/$defs/plainSubsection"}
+          }
+        }
+      }
+    },
+    "plainSection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "content"],
+      "properties": {
+        "title": {"$ref": "#/$defs/nonEmptyString"},
+        "content": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    },
+    "modelQuestion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["question_id", "title", "subsections"],
+      "properties": {
+        "question_id": {"$ref": "#/$defs/questionId"},
+        "title": {"$ref": "#/$defs/nonEmptyString"},
+        "subsections": {
+          "type": "object",
+          "minProperties": 2,
+          "maxProperties": 2,
+          "propertyNames": {"pattern": "^5\\.[1-9][0-9]*\\.[12]$"},
+          "additionalProperties": {"$ref": "#/$defs/plainSubsection"}
+        }
+      }
+    },
+    "modelSection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "questions"],
+      "properties": {
+        "title": {"const": "模型的建立与求解"},
+        "questions": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/modelQuestion"}
+        }
+      }
+    },
+    "figureReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["figure_id", "manifest_path", "manifest_hash"],
+      "properties": {
+        "figure_id": {"$ref": "#/$defs/nonEmptyString"},
+        "manifest_path": {"$ref": "#/$defs/relativePath"},
+        "manifest_hash": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "tableReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["table_id", "manifest_path", "manifest_hash"],
+      "properties": {
+        "table_id": {"$ref": "#/$defs/nonEmptyString"},
+        "manifest_path": {"$ref": "#/$defs/relativePath"},
+        "manifest_hash": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "requirementManifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "path", "sha256"],
+      "properties": {
+        "kind": {"enum": ["template", "competition"]},
+        "path": {"$ref": "#/$defs/relativePath"},
+        "sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "referenceEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["citation_id", "entry"],
+      "properties": {
+        "citation_id": {"$ref": "#/$defs/nonEmptyString"},
+        "entry": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    },
+    "codeEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "sha256", "description"],
+      "properties": {
+        "path": {"$ref": "#/$defs/relativePath"},
+        "sha256": {"$ref": "#/$defs/sha256"},
+        "description": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    },
+    "aiEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool", "purpose", "output_used", "human_verified"],
+      "properties": {
+        "tool": {"$ref": "#/$defs/nonEmptyString"},
+        "purpose": {"$ref": "#/$defs/nonEmptyString"},
+        "output_used": {"$ref": "#/$defs/nonEmptyString"},
+        "human_verified": {"type": "boolean"}
+      }
+    },
+    "reviewEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["review_id", "scope", "status", "reviewed_by"],
+      "properties": {
+        "review_id": {"$ref": "#/$defs/nonEmptyString"},
+        "scope": {"$ref": "#/$defs/nonEmptyString"},
+        "status": {"enum": ["pending", "confirmed", "rejected"]},
+        "reviewed_by": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    },
+    "supplementEntry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["title", "content"],
+      "properties": {
+        "title": {"$ref": "#/$defs/nonEmptyString"},
+        "content": {"$ref": "#/$defs/nonEmptyString"}
+      }
+    }
+  }
+}
