@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import re
+import math
 import stat
 import struct
 import zlib
@@ -19,6 +20,13 @@ FIGURE_ROLES = ("evidence", "validation", "diagnostic", "conceptual")
 FIGURE_STATUSES = ("draft", "verified", "stale", "needs_review")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+_PDF_MEDIA_BOX_RE = re.compile(
+    rb"/MediaBox\s*\[\s*([-+0-9.]+)\s+([-+0-9.]+)\s+([-+0-9.]+)\s+([-+0-9.]+)\s*\]"
+)
+_SVG_LENGTH_RE = re.compile(
+    r"^\s*([0-9]+(?:\.[0-9]+)?)\s*(mm|cm|in|pt|px)?\s*$",
+    re.IGNORECASE,
+)
 
 
 def _nonempty(value: object) -> bool:
@@ -123,6 +131,8 @@ def _parse_png(path: Path) -> tuple[int, int, float, float]:
             if length != 0:
                 raise ValueError("PNG IEND is invalid")
             saw_end = True
+            if end != len(data):
+                raise ValueError("PNG has trailing bytes after IEND")
             break
         offset = end
     if width is None or height is None:
@@ -169,12 +179,41 @@ def _validate_png(
 
 def _validate_pdf(path: Path, label: str, errors: list[str]) -> None:
     try:
-        signature = path.read_bytes()[:5]
+        content = path.read_bytes()
     except OSError as error:
         errors.append(f"{label} PDF cannot be read: {error}")
         return
-    if signature != b"%PDF-":
+    if not content.startswith(b"%PDF-"):
         errors.append(f"{label} has an invalid PDF signature")
+        return
+    match = _PDF_MEDIA_BOX_RE.search(content[:1024 * 1024])
+    if match is None:
+        errors.append(f"{label} PDF page size MediaBox is missing or invalid")
+        return
+    try:
+        x0, y0, x1, y1 = (float(value) for value in match.groups())
+    except ValueError:
+        errors.append(f"{label} PDF page size MediaBox is invalid")
+        return
+    if not all(math.isfinite(value) for value in (x0, y0, x1, y1)):
+        errors.append(f"{label} PDF page size MediaBox is invalid")
+    elif x1 <= x0 or y1 <= y0:
+        errors.append(f"{label} PDF page size MediaBox must be positive")
+
+
+def _svg_length_mm(value: str) -> float:
+    match = _SVG_LENGTH_RE.fullmatch(value)
+    if match is None:
+        raise ValueError("SVG dimension is invalid")
+    number = float(match.group(1))
+    factors = {
+        "mm": 1.0,
+        "cm": 10.0,
+        "in": 25.4,
+        "pt": 25.4 / 72.0,
+        "px": 25.4 / 96.0,
+    }
+    return number * factors[(match.group(2) or "px").lower()]
 
 
 def _validate_svg(path: Path, label: str, errors: list[str]) -> None:
@@ -185,6 +224,26 @@ def _validate_svg(path: Path, label: str, errors: list[str]) -> None:
         return
     if root.tag.rsplit("}", 1)[-1].lower() != "svg":
         errors.append(f"{label} has an invalid SVG signature")
+        return
+    width = root.get("width")
+    height = root.get("height")
+    try:
+        if width is not None or height is not None:
+            if width is None or height is None:
+                raise ValueError("SVG width and height must both be declared")
+            if _svg_length_mm(width) <= 0 or _svg_length_mm(height) <= 0:
+                raise ValueError("SVG dimensions must be positive")
+        else:
+            view_box = root.get("viewBox")
+            if view_box is None:
+                raise ValueError("SVG dimensions and viewBox are missing")
+            values = [float(value) for value in view_box.replace(",", " ").split()]
+            if len(values) != 4 or not all(math.isfinite(value) for value in values):
+                raise ValueError("SVG viewBox is invalid")
+            if values[2] <= 0 or values[3] <= 0:
+                raise ValueError("SVG viewBox dimensions must be positive")
+    except (TypeError, ValueError) as error:
+        errors.append(f"{label} SVG dimension check failed: {error}")
 
 
 def _validate_axes(manifest: dict[str, object], errors: list[str]) -> None:

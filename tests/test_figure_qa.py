@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import importlib
+import re
 import struct
 import sys
 import tempfile
@@ -19,6 +21,8 @@ from figure_qa import refresh_figure_status, validate_figure_manifest  # noqa: E
 from export_figure import export_figure  # noqa: E402
 from manifest import sha256_file  # noqa: E402
 from visual_qa import run_visual_qa  # noqa: E402
+
+export_figure_module = importlib.import_module("export_figure")
 
 
 def _png_chunk(kind: bytes, payload: bytes) -> bytes:
@@ -176,6 +180,28 @@ class FigureQATests(unittest.TestCase):
         )
         self.assertTrue(any("PDF" in error for error in errors))
 
+    def test_pdf_requires_a_positive_media_box(self) -> None:
+        (self.project / "figures/q1.pdf").write_bytes(
+            b"%PDF-1.4\n1 0 obj<</Type/Page/MediaBox[0 0 0 144]>>endobj\n%%EOF\n"
+        )
+        errors = validate_figure_manifest(self.make_manifest(), project_root=self.project)
+        self.assertTrue(any("MediaBox" in error or "PDF page size" in error for error in errors))
+
+    def test_svg_requires_nonzero_physical_dimensions(self) -> None:
+        (self.project / "figures/q1.svg").write_text(
+            '<svg xmlns="http://www.w3.org/2000/svg" width="0mm" height="0mm"></svg>\n',
+            encoding="utf-8",
+        )
+        errors = validate_figure_manifest(self.make_manifest(), project_root=self.project)
+        self.assertTrue(any("SVG" in error and "dimension" in error for error in errors))
+
+    def test_png_rejects_trailing_bytes_after_iend(self) -> None:
+        manifest = self.make_png_manifest(dpi=300)
+        output = self.project / "figures/q1.png"
+        output.write_bytes(output.read_bytes() + b"JUNK")
+        errors = validate_figure_manifest(manifest, project_root=self.project)
+        self.assertTrue(any("trailing" in error for error in errors))
+
     def test_refresh_persists_verified_then_stale_without_accepting_new_hash(self) -> None:
         manifest_path = self.project / "manifests/q1-figure.json"
         manifest = self.make_manifest()
@@ -261,7 +287,9 @@ class FigureQATests(unittest.TestCase):
                 self.assertTrue(style_state["active"])
                 target = Path(path)
                 if target.suffix == ".pdf":
-                    target.write_bytes(b"%PDF-1.4\n%%EOF\n")
+                    target.write_bytes(
+                        b"%PDF-1.4\n1 0 obj<</Type/Page/MediaBox[0 0 240.945 144]>>endobj\n%%EOF\n"
+                    )
                 elif target.suffix == ".png":
                     _write_png(target, width=1200, height=800, dpi=int(kwargs["dpi"]))
                 else:
@@ -271,7 +299,7 @@ class FigureQATests(unittest.TestCase):
         figure.assertTrue = self.assertTrue
         figure.fail = self.fail
         with patch.dict(sys.modules, {"matplotlib": matplotlib}):
-            refreshed = export_figure(
+            refreshed = export_figure_module.export_figure(
                 figure,
                 source_result_path=Path("results/q1.json"),
                 figure_manifest_path=Path("manifests/q1-figure.json"),
@@ -281,6 +309,78 @@ class FigureQATests(unittest.TestCase):
         self.assertEqual("verified", refreshed["status"])
         self.assertTrue((self.project / "figures/q1.pdf").read_bytes().startswith(b"%PDF-"))
         self.assertTrue((self.project / "figures/q1.png").read_bytes().startswith(b"\x89PNG"))
+
+    def test_export_rolls_back_all_outputs_when_a_later_publish_fails(self) -> None:
+        manifest = self.make_png_manifest(dpi=300)
+        manifest["outputs"].insert(0, {"path": "figures/q1.pdf", "format": "pdf"})
+        manifest_path = self.project / "manifests/q1-figure.json"
+        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        old_pdf = b"%PDF-1.4\nold-pdf\n%%EOF\n"
+        old_png = (self.project / "figures/q1.png").read_bytes()
+        (self.project / "figures/q1.pdf").write_bytes(old_pdf)
+
+        style_state = {"active": False}
+
+        class Style:
+            @staticmethod
+            def use(path: object) -> None:
+                style_state["active"] = Path(path).is_file()
+
+        matplotlib = types.ModuleType("matplotlib")
+        matplotlib.style = Style()
+
+        class FixtureFigure:
+            def savefig(self, path: object, **kwargs: object) -> None:
+                self.assertTrue(style_state["active"])
+                target = Path(path)
+                if target.suffix == ".pdf":
+                    target.write_bytes(
+                        b"%PDF-1.4\n1 0 obj<</Type/Page/MediaBox[0 0 240.945 144]>>endobj\nnew-pdf\n%%EOF\n"
+                    )
+                elif target.suffix == ".png":
+                    _write_png(target, width=1200, height=800, dpi=int(kwargs["dpi"]))
+
+        figure = FixtureFigure()
+        figure.assertTrue = self.assertTrue
+        call_count = {"value": 0}
+        real_replace = export_figure_module.os.replace
+
+        def fail_on_later_publish(source: object, target: object) -> None:
+            call_count["value"] += 1
+            if call_count["value"] == 2:
+                raise OSError("simulated later publish failure")
+            real_replace(source, target)
+
+        with (
+            patch.dict(sys.modules, {"matplotlib": matplotlib}),
+            patch.object(export_figure_module.os, "replace", side_effect=fail_on_later_publish),
+            self.assertRaisesRegex(OSError, "simulated later publish failure"),
+        ):
+            export_figure_module.export_figure(
+                figure,
+                source_result_path=Path("results/q1.json"),
+                figure_manifest_path=Path("manifests/q1-figure.json"),
+                project_root=self.project,
+            )
+
+        self.assertEqual(old_pdf, (self.project / "figures/q1.pdf").read_bytes())
+        self.assertEqual(old_png, (self.project / "figures/q1.png").read_bytes())
+        self.assertEqual([], list((self.project / "figures").glob(".q1.*")))
+
+    def test_style_palette_uses_matplotlib_hex_colors(self) -> None:
+        style_path = ROOT / "skills/math-modeling-visualization/assets/styles/modeling.mplstyle"
+        text = style_path.read_text(encoding="utf-8")
+        palette = re.search(r"axes\.prop_cycle:\s*cycler\(color=\[(.*?)\]\)", text)
+        self.assertIsNotNone(palette)
+        self.assertGreaterEqual(len(re.findall(r"#[0-9A-Fa-f]{6}", palette.group(1))), 6)
+        self.assertNotRegex(palette.group(1), r"(?<!#)\b[0-9A-Fa-f]{6}\b")
+
+    def test_visualization_agent_metadata_is_present_and_discoverable(self) -> None:
+        metadata_path = ROOT / "skills/math-modeling-visualization/agents/openai.yaml"
+        self.assertTrue(metadata_path.is_file())
+        metadata = metadata_path.read_text(encoding="utf-8")
+        self.assertIn("$math-modeling-visualization", metadata)
+        self.assertRegex(metadata, r"(?m)^\s*allow_implicit_invocation:\s*true\s*$")
 
     def test_visual_qa_reports_missing_renderer_as_needs_review(self) -> None:
         result = run_visual_qa(

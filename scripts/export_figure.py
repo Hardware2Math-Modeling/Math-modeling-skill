@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import copy
 import os
+import shutil
 import stat
 import tempfile
 from pathlib import Path
@@ -139,6 +140,8 @@ def export_figure(
     matplotlib_style.use(STYLE_PATH)
 
     temporary_outputs: list[tuple[Path, Path]] = []
+    backups: list[tuple[Path, Path | None]] = []
+    published: list[Path] = []
     try:
         for output, target, output_format in planned:
             descriptor, temporary_name = tempfile.mkstemp(
@@ -167,15 +170,49 @@ def export_figure(
                     + "\n- ".join(errors)
                 )
             temporary_outputs.append((temporary, target))
+        # Stage backups for every existing target before publishing any output.
+        # If a later replacement fails, restore all originals before re-raising.
+        for _temporary, target in temporary_outputs:
+            if target.exists():
+                descriptor, backup_name = tempfile.mkstemp(
+                    dir=target.parent,
+                    prefix=f".{target.stem}.backup.",
+                    suffix=target.suffix,
+                )
+                os.close(descriptor)
+                backup = Path(backup_name)
+                shutil.copy2(target, backup)
+                backups.append((target, backup))
+            else:
+                backups.append((target, None))
         for temporary, target in temporary_outputs:
             os.replace(temporary, target)
+            published.append(target)
         temporary_outputs.clear()
+    except BaseException:
+        # Remove any newly published files first, then restore backups in reverse order.
+        for target in reversed(published):
+            try:
+                target.unlink()
+            except FileNotFoundError:
+                pass
+        for target, backup in reversed(backups):
+            if backup is not None and backup.exists():
+                os.replace(backup, target)
+        backups.clear()
+        raise
     finally:
         for temporary, _target in temporary_outputs:
             try:
                 temporary.unlink()
             except FileNotFoundError:
                 pass
+        for _target, backup in backups:
+            if backup is not None:
+                try:
+                    backup.unlink()
+                except FileNotFoundError:
+                    pass
 
     return refresh_figure_status(manifest_target, project_root=root)
 
