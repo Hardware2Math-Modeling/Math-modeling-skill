@@ -1,3 +1,4 @@
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -6,6 +7,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
+from handoff_schema import validate_document  # noqa: E402
 from result_contract import validate_result_payload  # noqa: E402
 
 
@@ -33,7 +35,7 @@ def valid_result() -> dict[str, object]:
         "units": {"time": "day", "population": "individuals"},
         "run_manifest": {
             "run_id": "run-q1-001",
-            "status": "current",
+            "status": "success",
             "seed": 1729,
         },
         "validation_plan": {
@@ -47,7 +49,7 @@ def valid_result() -> dict[str, object]:
         "validation_history": [],
         "validation_manifest": {
             "validation_cycle_id": "validation-q1-001",
-            "status": "current",
+            "status": "pass",
         },
         "figure_manifests": [
             {"figure_id": "q1-main", "status": "verified"},
@@ -86,6 +88,9 @@ class ResultContractTests(unittest.TestCase):
             "units",
             "run_manifest",
             "validation_plan",
+            "validation_history",
+            "validation_manifest",
+            "figure_manifests",
             "claims",
             "freeze_status",
         )
@@ -164,6 +169,7 @@ class ResultContractTests(unittest.TestCase):
         payload = valid_result()
         payload["validation_plan"]["validation_cycle_id"] = "validation-q1-002"
         payload["validation_plan"]["threshold"] = 0.80
+        payload["validation_manifest"]["validation_cycle_id"] = "validation-q1-002"
         payload["validation_history"] = [
             {
                 "validation_cycle_id": "validation-q1-001",
@@ -189,6 +195,54 @@ class ResultContractTests(unittest.TestCase):
                 errors = validate_result_payload(payload)
                 self.assertTrue(any(missing_field in error for error in errors))
 
+    def test_validation_cycle_ids_cannot_be_reused_nonadjacently(self) -> None:
+        payload = valid_result()
+        payload["validation_plan"]["validation_cycle_id"] = "validation-q1-003"
+        payload["validation_plan"]["threshold"] = 0.90
+        payload["validation_history"] = [
+            {
+                "validation_cycle_id": "validation-q1-001",
+                "threshold": 0.70,
+                "status": "fail",
+            },
+            {
+                "validation_cycle_id": "validation-q1-002",
+                "threshold": 0.80,
+                "status": "fail",
+            },
+            {
+                "validation_cycle_id": "validation-q1-001",
+                "threshold": 0.90,
+                "status": "fail",
+            },
+        ]
+        errors = validate_result_payload(payload)
+        self.assertTrue(any("validation_cycle_id" in error and "unique" in error for error in errors))
+
+    def test_current_validation_cycle_id_cannot_reuse_historical_id(self) -> None:
+        payload = valid_result()
+        payload["validation_history"] = [
+            {
+                "validation_cycle_id": "validation-q1-001",
+                "threshold": 0.60,
+                "status": "fail",
+            }
+        ]
+        errors = validate_result_payload(payload)
+        self.assertTrue(any("validation_plan.validation_cycle_id" in error for error in errors))
+
+    def test_validation_manifest_must_match_current_cycle(self) -> None:
+        payload = valid_result()
+        payload["validation_manifest"]["validation_cycle_id"] = "validation-q1-000"
+        errors = validate_result_payload(payload)
+        self.assertTrue(
+            any(
+                "validation_manifest.validation_cycle_id" in error
+                and "current" in error
+                for error in errors
+            )
+        )
+
     def test_nan_or_unverified_number_cannot_be_frozen(self) -> None:
         payload = valid_result()
         payload["metrics"]["score"] = "NaN"
@@ -213,10 +267,119 @@ class ResultContractTests(unittest.TestCase):
                 errors = validate_result_payload(payload)
                 self.assertTrue(any("freeze" in error and field in error for error in errors))
 
+    def test_confirmed_result_requires_explicit_validation_and_figure_containers(self) -> None:
+        for field in ("validation_manifest", "figure_manifests"):
+            with self.subTest(field=field):
+                payload = valid_result()
+                payload["freeze_status"] = "confirmed"
+                del payload[field]
+                errors = validate_result_payload(payload)
+                self.assertTrue(any(field in error for error in errors))
+
+    def test_evidence_status_vocabularies_are_not_interchangeable(self) -> None:
+        mutations = (
+            ("run_manifest", "pass"),
+            ("run_manifest", "verified"),
+            ("validation_manifest", "success"),
+            ("validation_manifest", "verified"),
+            ("figure_manifests", "success"),
+            ("figure_manifests", "pass"),
+        )
+        for field, status in mutations:
+            with self.subTest(field=field, status=status):
+                payload = valid_result()
+                if field == "figure_manifests":
+                    payload[field][0]["status"] = status
+                else:
+                    payload[field]["status"] = status
+                errors = validate_result_payload(payload)
+                self.assertTrue(any(field in error and status in error for error in errors))
+
+    def test_explicit_empty_figure_list_is_valid_when_no_figure_is_registered(self) -> None:
+        payload = valid_result()
+        payload["figure_manifests"] = []
+        payload["freeze_status"] = "confirmed"
+        self.assertEqual([], validate_result_payload(payload))
+
     def test_confirmed_result_accepts_current_evidence(self) -> None:
         payload = valid_result()
         payload["freeze_status"] = "confirmed"
         self.assertEqual([], validate_result_payload(payload))
+
+    def test_gate_evidence_has_a_legal_strict_v2_handoff_placement(self) -> None:
+        handoff = json.loads(
+            (ROOT / "tests/fixtures/handoff-v2.json").read_text(encoding="utf-8")
+        )
+        handoff["artifacts"] = [
+            {
+                "path": "models/q1/specification.json",
+                "kind": "model-specification",
+                "description": "Q1 accepted model and validation plan.",
+                "sha256": "c" * 64,
+            },
+            {
+                "path": "results/q1/result-contract.json",
+                "kind": "result-contract",
+                "description": "Q1 result contract.",
+                "sha256": "a" * 64,
+            },
+            {
+                "path": "results/q1/run-manifest.json",
+                "kind": "run-manifest",
+                "description": "Q1 run evidence.",
+                "sha256": "b" * 64,
+            },
+            {
+                "path": "results/q1/validation-manifest.json",
+                "kind": "validation-manifest",
+                "description": "Q1 current validation evidence.",
+                "sha256": "d" * 64,
+            },
+        ]
+        handoff["result"]["computed_values"] = [
+            {
+                "gate_id": "gate2",
+                "status": "pending",
+                "question_id": "Q1",
+                "model_id": "logistic-growth-v1",
+                "baseline": {"model_id": "constant-mean-v1", "metric": "score"},
+                "parameter_sources": ["data/q1-parameters.json"],
+                "validation_plan": {
+                    "validation_cycle_id": "validation-q1-001",
+                    "threshold": 0.70,
+                    "split": "holdout",
+                    "scope": "Q1 test observations",
+                    "seed": 1729,
+                    "method": "blocked holdout",
+                },
+                "acceptable_failure_conditions": ["score below 0.70"],
+                "specification_path": "models/q1/specification.json",
+                "specification_hash": "c" * 64,
+            },
+            {
+                "gate_id": "gate3",
+                "status": "pending",
+                "question_id": "Q1",
+                "result_contract_path": "results/q1/result-contract.json",
+                "result_contract_hash": "a" * 64,
+                "run_manifest_path": "results/q1/run-manifest.json",
+                "run_status": "success",
+                "claim_ids": ["claim-q1-01"],
+                "validation_cycle_id": "validation-q1-001",
+                "validation_manifest_path": "results/q1/validation-manifest.json",
+                "validation_status": "pass",
+                "figure_manifests": [],
+                "freeze_status": "draft",
+            }
+        ]
+        handoff["result"]["details"] = ["Gate 3 remains pending."]
+        handoff["next"]["rationale"] = "Gate 3 remains pending for the orchestrator."
+
+        self.assertEqual([], validate_document(handoff, kind="handoff", mode="runtime"))
+
+        misplaced = json.loads(json.dumps(handoff))
+        misplaced["result"]["gate3"] = misplaced["result"]["computed_values"][1]
+        self.assertTrue(validate_document(misplaced, kind="handoff", mode="runtime"))
 
 
 if __name__ == "__main__":

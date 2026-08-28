@@ -19,13 +19,15 @@ _REQUIRED_FIELDS = (
     "units",
     "run_manifest",
     "validation_plan",
+    "validation_history",
+    "validation_manifest",
+    "figure_manifests",
     "claims",
     "freeze_status",
 )
 _QUESTION_RE = re.compile(r"^Q[1-9][0-9]*$")
 _HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _FREEZE_STATUSES = ("draft", "confirmed")
-_CURRENT_STATUSES = {"current", "verified", "pass"}
 
 
 def _nonempty(value: object) -> bool:
@@ -91,8 +93,10 @@ def _validate_run_manifest(value: object, errors: list[str]) -> None:
         errors.append("run_manifest.run_id must be a non-empty string")
     if type(value.get("seed")) is not int:
         errors.append("run_manifest.seed must be a fixed integer")
-    if not _nonempty(value.get("status")):
-        errors.append("run_manifest.status must be a non-empty string")
+    if value.get("status") != "success":
+        errors.append(
+            f"run_manifest.status must be 'success', not {value.get('status')!r}"
+        )
 
 
 def _validate_validation_plan(value: object, errors: list[str]) -> None:
@@ -115,13 +119,11 @@ def _validate_validation_history(
     plan: object,
     errors: list[str],
 ) -> None:
-    if history is None:
-        history = []
     if type(history) is not list:
         errors.append("validation_history must be a list")
         return
 
-    valid_entries: list[dict[str, object]] = []
+    cycle_ids: set[str] = set()
     for index, entry in enumerate(history):
         label = f"validation_history[{index}]"
         if type(entry) is not dict:
@@ -132,23 +134,23 @@ def _validate_validation_history(
         status_valid = _nonempty(entry.get("status"))
         if not cycle_valid:
             errors.append(f"{label}.validation_cycle_id must preserve the previous cycle")
+        elif entry["validation_cycle_id"] in cycle_ids:
+            errors.append(f"{label}.validation_cycle_id must be globally unique")
+        else:
+            cycle_ids.add(entry["validation_cycle_id"])
         if not threshold_valid:
             errors.append(f"{label}.threshold must be a finite numeric value")
         if not status_valid:
             errors.append(f"{label}.status must preserve the previous outcome")
-        if cycle_valid and threshold_valid and status_valid:
-            valid_entries.append(entry)
-
-    for previous, current in zip(valid_entries, valid_entries[1:]):
-        if (
-            current["threshold"] != previous["threshold"]
-            and current["validation_cycle_id"] == previous["validation_cycle_id"]
-        ):
-            errors.append(
-                "validation_history threshold changes require a new validation_cycle_id"
-            )
-
-    if type(plan) is not dict or not history:
+    if type(plan) is not dict:
+        return
+    current_cycle = plan.get("validation_cycle_id")
+    if _nonempty(current_cycle) and current_cycle in cycle_ids:
+        errors.append(
+            "validation_plan.validation_cycle_id must be unique and not reuse a "
+            "historical validation cycle"
+        )
+    if not history:
         return
     latest = history[-1]
     if type(latest) is not dict:
@@ -159,7 +161,6 @@ def _validate_validation_history(
         return
     if current_threshold != previous_threshold:
         previous_cycle = latest.get("validation_cycle_id")
-        current_cycle = plan.get("validation_cycle_id")
         if not _nonempty(previous_cycle) or not _nonempty(latest.get("status")):
             errors.append(
                 "validation_plan.threshold changed without preserving the previous "
@@ -168,6 +169,48 @@ def _validate_validation_history(
         if not _nonempty(current_cycle) or current_cycle == previous_cycle:
             errors.append(
                 "validation_plan.threshold changes require a new validation_cycle_id"
+            )
+
+
+def _validate_validation_manifest(
+    value: object,
+    plan: object,
+    errors: list[str],
+) -> None:
+    if type(value) is not dict:
+        errors.append("validation_manifest must be an object")
+        return
+    if value.get("status") != "pass":
+        errors.append(
+            "validation_manifest.status must be 'pass', "
+            f"not {value.get('status')!r}"
+        )
+    cycle_id = value.get("validation_cycle_id")
+    if not _nonempty(cycle_id):
+        errors.append(
+            "validation_manifest.validation_cycle_id must be a non-empty string"
+        )
+    elif type(plan) is not dict or cycle_id != plan.get("validation_cycle_id"):
+        errors.append(
+            "validation_manifest.validation_cycle_id must match the current "
+            "validation_plan.validation_cycle_id"
+        )
+
+
+def _validate_figure_manifests(value: object, errors: list[str]) -> None:
+    if type(value) is not list:
+        errors.append("figure_manifests must be an explicit list")
+        return
+    for index, figure in enumerate(value):
+        label = f"figure_manifests[{index}]"
+        if type(figure) is not dict:
+            errors.append(f"{label} must be a registered figure manifest object")
+            continue
+        if not _nonempty(figure.get("figure_id")):
+            errors.append(f"{label}.figure_id must be a non-empty string")
+        if figure.get("status") != "verified":
+            errors.append(
+                f"{label}.status must be 'verified', not {figure.get('status')!r}"
             )
 
 
@@ -223,37 +266,31 @@ def _validate_freeze(payload: dict[str, object], errors: list[str]) -> None:
     if freeze_status != "confirmed":
         return
 
-    run_status = _evidence_status(payload.get("run_manifest"))
-    if run_status not in _CURRENT_STATUSES:
-        errors.append("freeze_status confirmed requires a current run_manifest")
+    if _evidence_status(payload.get("run_manifest")) != "success":
+        errors.append("freeze_status confirmed requires run_manifest status success")
 
     validation_manifest = payload.get("validation_manifest")
-    if validation_manifest is not None:
-        validation_status = _evidence_status(validation_manifest)
-        if validation_status not in _CURRENT_STATUSES:
+    if _evidence_status(validation_manifest) != "pass":
+        errors.append("freeze_status confirmed requires validation_manifest status pass")
+    if type(validation_manifest) is dict and type(payload.get("validation_plan")) is dict:
+        if validation_manifest.get("validation_cycle_id") != payload[
+            "validation_plan"
+        ].get("validation_cycle_id"):
             errors.append(
-                "freeze_status confirmed requires a current validation_manifest"
+                "freeze_status confirmed requires validation_manifest for the "
+                "current validation cycle"
             )
-        if type(validation_manifest) is dict and type(payload.get("validation_plan")) is dict:
-            if validation_manifest.get("validation_cycle_id") != payload[
-                "validation_plan"
-            ].get("validation_cycle_id"):
-                errors.append(
-                    "freeze_status confirmed requires validation_manifest for the "
-                    "current validation cycle"
-                )
 
     figures = payload.get("figure_manifests")
-    if figures is not None:
-        if type(figures) is not list:
-            errors.append("freeze_status confirmed requires figure_manifests to be a list")
-        else:
-            for index, figure in enumerate(figures):
-                if _evidence_status(figure) != "verified":
-                    errors.append(
-                        "freeze_status confirmed requires "
-                        f"figure_manifests[{index}] to be verified"
-                    )
+    if type(figures) is not list:
+        errors.append("freeze_status confirmed requires figure_manifests to be a list")
+    else:
+        for index, figure in enumerate(figures):
+            if _evidence_status(figure) != "verified":
+                errors.append(
+                    "freeze_status confirmed requires "
+                    f"figure_manifests[{index}] to be verified"
+                )
 
     metrics = payload.get("metrics")
     if type(metrics) is not dict or any(
@@ -311,6 +348,8 @@ def validate_result_payload(payload: object) -> list[str]:
     plan = payload.get("validation_plan")
     _validate_validation_plan(plan, errors)
     _validate_validation_history(payload.get("validation_history"), plan, errors)
+    _validate_validation_manifest(payload.get("validation_manifest"), plan, errors)
+    _validate_figure_manifests(payload.get("figure_manifests"), errors)
     _validate_claims(payload.get("claims"), metrics, errors)
     _validate_freeze(payload, errors)
     return errors
