@@ -347,6 +347,65 @@ class MethodLibraryTests(unittest.TestCase):
         self.assertIn("O(np^2+iter*p^3)", item["scale_limit"])
         self.assertIn("p<=50", item["scale_limit"])
 
+    def test_pca_rejects_an_iteration_budget_that_cannot_certify_the_leading_direction(self) -> None:
+        module = _load_template("pca-reduction")
+        columns = 200
+        uniform = [1 / columns ** 0.5] * columns
+        contrast = [0.0] * columns
+        contrast[0], contrast[1] = 2 ** -0.5, -(2 ** -0.5)
+        components = [
+            (0.4, [1.0 if row == column else 0.0 for row in range(columns)])
+            for column in range(columns)
+        ]
+        components.extend(((0.6, uniform), (0.1, contrast)))
+        sample_count = 2 * len(components)
+        matrix = []
+        for variance, direction in components:
+            amplitude = ((sample_count - 1) * variance / 2) ** 0.5
+            positive = [amplitude * value for value in direction]
+            matrix.extend((positive, [-value for value in positive]))
+
+        with self.assertRaisesRegex(ValueError, "did not converge"):
+            module.solve({"matrix": matrix, "iterations": 1}, {"seed": 0})
+
+    def test_pca_accepts_small_nonzero_covariance_above_the_total_variance_boundary(self) -> None:
+        module = _load_template("pca-reduction")
+        eigenvalues = [9e-16, 1e-16, 1e-16]
+        sample_count = 2 * len(eigenvalues)
+        matrix = []
+        for index, eigenvalue in enumerate(eigenvalues):
+            amplitude = ((sample_count - 1) * eigenvalue / 2) ** 0.5
+            positive = [0.0] * len(eigenvalues)
+            positive[index] = amplitude
+            matrix.extend((positive, [-value for value in positive]))
+
+        result = module.solve({"matrix": matrix, "iterations": 10}, {"seed": 0})
+
+        self.assertTrue(
+            math.isclose(
+                result["metrics"]["explained_variance"],
+                9e-16,
+                rel_tol=1e-12,
+                abs_tol=0.0,
+            )
+        )
+        self.assertAlmostEqual(9 / 11, result["metrics"]["explained_variance_ratio"])
+        self.assertEqual([1.0, 0.0, 0.0], result["metrics"]["loadings"])
+        self.assertLessEqual(
+            result["metrics"]["convergence_residual"],
+            result["metrics"]["convergence_tolerance"],
+        )
+
+    def test_pca_catalog_documents_the_convergence_budget_and_fail_closed_behavior(self) -> None:
+        item = next(entry for entry in load_catalog() if entry["id"] == "pca-reduction")
+        iterations = next(value for value in item["inputs"] if value["name"] == "iterations")
+
+        self.assertIn("最大", iterations["meaning"])
+        self.assertIn("默认 100", iterations["meaning"])
+        self.assertIn("1 至 10000", iterations["meaning"])
+        self.assertTrue(any("未收敛" in signal for signal in item["failure_signals"]))
+        self.assertTrue(any("残差" in check for check in item["validation"]))
+
     def test_every_direct_solve_rejects_nonfinite_input_even_when_unused(self) -> None:
         fixture_payload = _strict_json(LIBRARY / "assets/fixtures/method-smoke.json")
         fixtures = {fixture["method_id"]: fixture for fixture in fixture_payload["fixtures"]}
