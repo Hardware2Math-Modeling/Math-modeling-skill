@@ -1,0 +1,20 @@
+{
+  "competition": "CUMCM",
+  "language": "zh-CN",
+  "requires_official_verification": true,
+  "gate_ids": [
+    "gate1",
+    "gate2",
+    "gate3"
+  ],
+  "paper_defaults": {
+    "body_pages": {
+      "minimum": 25,
+      "maximum": 27
+    },
+    "total_pages": {
+      "maximum": 30
+    }
+  },
+  "official_sources": []
+}

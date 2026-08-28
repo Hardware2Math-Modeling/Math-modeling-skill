@@ -18,6 +18,7 @@ Accept the current handoff and the original problem materials. When invoked inde
 - Classify every material statement as supplied fact, derived fact, assumption, or unknown. Preserve its provenance and do not turn a provisional assumption into a fact.
 - Check for conflicting objectives, incompatible units, hidden boundary conditions, ambiguous quantifiers, and missing definitions.
 - Identify only information needs and user questions whose answers could change the objective, constraints, or later model choice. Record lesser ambiguities as explicit assumptions.
+- Assemble the Gate 1 decision material after analysis: ordered subproblems, objectives, constraints, units, external-data needs, and all model-changing assumptions or ambiguities. Do not confirm Gate 1; the orchestrator records the user's auditable decision against artifact hashes.
 
 ## Boundaries
 
@@ -25,4 +26,4 @@ Do not select a mathematical model, solve equations, optimize parameters, or cre
 
 ## Output
 
-Return an updated handoff that preserves the faithful prompt in `task.statement` and records the clarified goals and limits in `task.objectives` and `task.constraints`. Set `state.current_stage` to `problem-analysis` with a justified `complete` or `needs_revision` status. In `result`, record subproblems, variables, metrics, units, fact classifications, assumptions, evidence, and critical ambiguities. Put uncertainty and unresolved material questions in `quality.warnings`, and set `quality.confidence` from the available evidence. Set `next.recommended_stage`, explain the recommendation and required information in `next.rationale`, and list other defensible routes in `next.alternatives`; the orchestrator decides the route.
+Return an updated handoff that preserves the faithful prompt in `task.statement` and records the clarified goals and limits in `task.objectives` and `task.constraints`. Set `state.current_stage` to `problem-analysis` with a justified `complete` or `needs_revision` status. In `result`, record subproblems, variables, metrics, units, fact classifications, assumptions, evidence, critical ambiguities, and the Gate 1 decision material. Put uncertainty and unresolved material questions in `quality.warnings`, and set `quality.confidence` from the available evidence. Set `next.recommended_stage`, explain the recommendation and required information in `next.rationale`, and list other defensible routes in `next.alternatives`; the orchestrator decides the route and Gate 1 remains pending until an exact confirmed record exists.
