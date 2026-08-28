@@ -367,13 +367,16 @@ class FigureQATests(unittest.TestCase):
         self.assertEqual(old_png, (self.project / "figures/q1.png").read_bytes())
         self.assertEqual([], list((self.project / "figures").glob(".q1.*")))
 
-    def test_style_palette_uses_matplotlib_hex_colors(self) -> None:
+    def test_style_uses_hash_prefix_for_every_six_digit_hex_color(self) -> None:
         style_path = ROOT / "skills/math-modeling-visualization/assets/styles/modeling.mplstyle"
         text = style_path.read_text(encoding="utf-8")
         palette = re.search(r"axes\.prop_cycle:\s*cycler\(color=\[(.*?)\]\)", text)
         self.assertIsNotNone(palette)
         self.assertGreaterEqual(len(re.findall(r"#[0-9A-Fa-f]{6}", palette.group(1))), 6)
-        self.assertNotRegex(palette.group(1), r"(?<!#)\b[0-9A-Fa-f]{6}\b")
+        for line_number, line in enumerate(text.splitlines(), start=1):
+            value = line.partition(":")[2]
+            with self.subTest(line=line_number):
+                self.assertNotRegex(value, r"(?<!#)\b[0-9A-Fa-f]{6}\b")
 
     def test_visualization_agent_metadata_is_present_and_discoverable(self) -> None:
         metadata_path = ROOT / "skills/math-modeling-visualization/agents/openai.yaml"

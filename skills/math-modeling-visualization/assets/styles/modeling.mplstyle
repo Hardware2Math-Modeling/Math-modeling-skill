@@ -4,7 +4,7 @@ font.size: 9
 axes.linewidth: 0.8
 axes.prop_cycle: cycler(color=['#0072B2', '#E69F00', '#009E73', '#D55E00', '#CC79A7', '#56B4E9', '#F0E442', '#000000'])
 axes.facecolor: white
-axes.edgecolor: 000000
+axes.edgecolor: #000000
 axes.labelsize: 9
 axes.titlesize: 10
 figure.facecolor: white
