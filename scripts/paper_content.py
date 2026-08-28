@@ -5,13 +5,15 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
 import stat
+import tempfile
 from pathlib import Path
 
 from figure_qa import validate_figure_manifest
 from handoff_schema import strict_json_tree_errors
-from manifest import atomic_write_json, safe_relative_path, sha256_file
+from manifest import safe_relative_path, sha256_file
 from result_contract import validate_result_payload
 from suite_validation import ensure_no_symlink_components
 
@@ -120,6 +122,60 @@ def _strict_json(path: Path, label: str) -> dict[str, object]:
     if type(payload) is not dict:
         raise ValueError(f"{label} must contain a JSON object")
     return payload
+
+
+def _write_new_json(path: Path, payload: object) -> None:
+    """Atomically publish one canonical JSON snapshot without replacement."""
+
+    strict_errors = strict_json_tree_errors(payload)
+    if strict_errors:
+        raise ValueError("frozen content is not strict JSON:\n- " + "\n- ".join(strict_errors))
+    content = json.dumps(
+        payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        indent=2,
+        allow_nan=False,
+    ) + "\n"
+
+    target = Path(path)
+    if not target.is_absolute() or any(part == ".." for part in target.parts):
+        raise ValueError("frozen content output must be an absolute canonical path")
+    target = ensure_no_symlink_components(target, "frozen content output")
+    if target.exists() or target.is_symlink():
+        raise FileExistsError(f"frozen content output already exists: {target}")
+    try:
+        parent_mode = target.parent.lstat().st_mode
+    except OSError as error:
+        raise ValueError("frozen content output parent must be an existing directory") from error
+    if not stat.S_ISDIR(parent_mode):
+        raise ValueError("frozen content output parent must be an existing directory")
+
+    temporary_name: str | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=target.parent,
+            prefix=f".{target.name}.",
+            suffix=".tmp",
+            delete=False,
+        ) as temporary:
+            temporary_name = temporary.name
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
+        os.link(temporary_name, target)
+    except FileExistsError as error:
+        raise FileExistsError(
+            f"frozen content output already exists: {target}"
+        ) from error
+    finally:
+        if temporary_name is not None:
+            try:
+                Path(temporary_name).unlink()
+            except FileNotFoundError:
+                pass
 
 
 def question_ids(content: object) -> list[str]:
@@ -381,6 +437,9 @@ def _reference_target(
         errors.append(f"{label}.{hash_field} must be a lowercase SHA-256 hash")
         return None
     if root is None:
+        errors.append(
+            f"{label} evidence is unverified without an absolute evidence_root"
+        )
         return None
     try:
         target = _evidence_path(root, entry[path_field], f"{label}.{path_field}")
@@ -431,6 +490,7 @@ def _validate_claims(
             errors.append(f"{label}.statement must be a non-empty string")
         if type(claim.get("important")) is not bool:
             errors.append(f"{label}.important must be boolean")
+        evidence_valid = False
         target = _reference_target(
             claim,
             path_field="source_path",
@@ -448,19 +508,37 @@ def _validate_claims(
                 result_errors = validate_result_payload(result)
                 if result_errors:
                     errors.append(f"{label} result contract is invalid: {result_errors[0]}")
-                if result.get("freeze_status") != "confirmed":
+                freeze_confirmed = result.get("freeze_status") == "confirmed"
+                if not freeze_confirmed:
                     errors.append(f"{label} result contract must have freeze_status confirmed")
-                if result.get("question_id") != question_id:
+                question_matches = result.get("question_id") == question_id
+                if not question_matches:
                     errors.append(f"{label}.question_id does not match the frozen result contract")
                 result_claims = result.get("claims")
-                result_ids = {
-                    item.get("claim_id")
-                    for item in result_claims
-                    if type(item) is dict
-                } if type(result_claims) is list else set()
-                if claim_id not in result_ids:
+                matched_claim = next(
+                    (
+                        item
+                        for item in result_claims
+                        if type(item) is dict and item.get("claim_id") == claim_id
+                    ),
+                    None,
+                ) if type(result_claims) is list else None
+                if matched_claim is None:
                     errors.append(f"{label}.claim_id does not resolve in the frozen result contract")
-        valid_claims.append(claim)
+                else:
+                    statement_matches = matched_claim.get("statement") == claim.get("statement")
+                    if not statement_matches:
+                        errors.append(
+                            f"{label}.statement must exactly match the frozen result claim statement"
+                        )
+                    evidence_valid = (
+                        not result_errors
+                        and freeze_confirmed
+                        and question_matches
+                        and statement_matches
+                    )
+        if evidence_valid:
+            valid_claims.append(claim)
     for question_id, count in counts.items():
         if count == 0:
             errors.append(f"claims must include at least one frozen result claim for {question_id}")
@@ -809,7 +887,7 @@ def freeze_content(
             for path in sorted(evidence)
         ],
     }
-    atomic_write_json(Path(output_path), frozen)
+    _write_new_json(Path(output_path), frozen)
     return frozen
 
 

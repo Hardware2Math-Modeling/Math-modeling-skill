@@ -308,6 +308,48 @@ class PaperContentTests(unittest.TestCase):
         errors = validate_paper_content(content, evidence_root=self.evidence)
         self.assertTrue(any("question_id" in error and "result" in error for error in errors))
 
+    def test_paper_claim_statement_must_match_frozen_result_claim(self) -> None:
+        content = self.content_with_evidence()
+        content["claims"][0]["statement"] = "篡改后的结果得分为 0.99。"
+        content["sections"]["8"]["content"] = "篡改后的结果得分为 0.99。"
+
+        errors = validate_paper_content(content, evidence_root=self.evidence)
+
+        self.assertTrue(
+            any("statement" in error and "frozen result" in error for error in errors)
+        )
+        self.assertTrue(
+            any("0.99" in error and "unsupported" in error for error in errors)
+        )
+
+    def test_claim_evidence_cannot_be_accepted_without_evidence_root(self) -> None:
+        content = valid_content(question_count=1)
+
+        errors = validate_paper_content(content)
+
+        self.assertTrue(
+            any("claims[0]" in error and "evidence_root" in error for error in errors)
+        )
+
+    def test_manifest_evidence_cannot_be_accepted_without_evidence_root(self) -> None:
+        content = valid_content(question_count=1)
+        content["figure_references"] = [
+            {
+                "figure_id": "plausible-but-fake",
+                "manifest_path": "manifests/plausible-but-fake.json",
+                "manifest_hash": "b" * 64,
+            }
+        ]
+
+        errors = validate_paper_content(content)
+
+        self.assertTrue(
+            any(
+                "figure_references[0]" in error and "evidence_root" in error
+                for error in errors
+            )
+        )
+
     def test_unsupported_numbers_are_rejected_from_narrative(self) -> None:
         content = valid_content(question_count=1)
         content["sections"]["8"]["content"] = "未经证据支持，指标达到 99.9%。"
@@ -490,6 +532,19 @@ class PaperContentTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "paper content validation failed"):
             freeze_content(invalid, output_path=blocked, evidence_root=self.evidence)
         self.assertEqual(b"preserve existing frozen evidence\n", blocked.read_bytes())
+
+    def test_valid_freeze_refuses_to_overwrite_existing_snapshot(self) -> None:
+        content = self.content_with_evidence()
+        target = self.evidence / "paper-content.json"
+        freeze_content(content, output_path=target, evidence_root=self.evidence)
+        first_snapshot = target.read_bytes()
+        changed = copy.deepcopy(content)
+        changed["sections"]["2"]["content"] = "另一份仍然有效的分析叙述。"
+
+        with self.assertRaises(FileExistsError):
+            freeze_content(changed, output_path=target, evidence_root=self.evidence)
+
+        self.assertEqual(first_snapshot, target.read_bytes())
 
 
 if __name__ == "__main__":

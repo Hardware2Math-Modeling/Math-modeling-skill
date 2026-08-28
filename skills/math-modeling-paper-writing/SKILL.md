@@ -9,7 +9,7 @@ Turn validation-passed modeling evidence into the requested deliverable without 
 
 ## Input gate
 
-Accept the current handoff and requested deliverable. When invoked independently, first read [the shared handoff contract](../math-modeling-orchestrator/references/handoff-contract.md) and normalize the handoff. Proceed only when `state.validation_status` is `pass`, no input stage from problem analysis through validation remains in `state.invalidated_stages`, Gate 3 has a current auditable `confirmed` record, and every question has a current result contract whose `freeze_status` is `confirmed`. Paper writing itself may remain invalidated while this stage regenerates it. Editing an existing deliverable does not bypass this gate. If any prerequisite is absent or stale, return `needs_revision`, name the evidence gap, and do not draft finished prose, infer a value, or fill the gap.
+Accept the current handoff and requested deliverable. When invoked independently, first read [the shared handoff contract](../math-modeling-orchestrator/references/handoff-contract.md) and normalize the handoff. Require the user-supplied absolute Python interpreter path recorded by preflight; if it is absent, stop and ask for it rather than selecting one. Proceed only when `state.validation_status` is `pass`, no input stage from problem analysis through validation remains in `state.invalidated_stages`, Gate 3 has a current auditable `confirmed` record, and every question has a current result contract whose `freeze_status` is `confirmed`. Paper writing itself may remain invalidated while this stage regenerates it. Editing an existing deliverable does not bypass this gate. If any prerequisite is absent or stale, return `needs_revision`, name the evidence gap, and do not draft finished prose, infer a value, or fill the gap.
 
 ## Required Chinese content contract
 
@@ -51,12 +51,13 @@ Build the structured content against [the paper-content schema](../math-modeling
 
 ## Responsibilities
 
-- Confirm the deliverable type, language, length, format, audience, and required sections before drafting when those constraints are not already supplied.
+- Formal delivery is LaTeX only; Word is not a formal output. Confirm the language, length, audience, and required sections before drafting when those constraints are not already supplied.
+- Ask for the template path before drafting and record this fixed priority for paper-production: user-supplied template, then an official template explicitly selected by the user, then a locally verified template, then the built-in fallback. Paper-production copies and uses the selected template; paper-writing does not modify a template installation in place.
 - Build a traceable narrative from the problem, assumptions, model choice, solution, evidence, and validation. Keep claims within validated scope.
 - Keep notation, equations, variable definitions, units, numerical precision, table and figure references, citations, and artifact paths mutually consistent.
 - Include assumptions, limitations, uncertainty, failure domains, extrapolation boundaries, and rejected alternatives when they matter to interpretation.
 - Report a missing citation, figure, calculation, or validation item directly. Preserve evidence gaps as gaps rather than inserting a plausible placeholder or unsupported number.
-- Treat a fallback template as `fallback_non_submission`: it may support a draft, but never a submission-ready claim. Preserve a production target of 25–27 body pages and no more than 30 total pages. Add only necessary derivation, analysis, validation, and limitations; never pad, add blank pages, manipulate font size, or use invisible content to meet a page count.
+- Treat a fallback template as `fallback_non_submission`: it may support a draft, but never a submission-ready claim. Preserve a production target of 25–27 body pages and no more than 30 total pages. These counts come only from the compiled PDF: body pages run from section 1 through section 8, while total pages include the cover, abstract, body, and appendices. Paper-production performs compilation and page counting. Add only necessary derivation, analysis, validation, and limitations; never pad, add blank pages, manipulate font size, or use invisible content to meet a page count.
 
 ## Boundaries
 
