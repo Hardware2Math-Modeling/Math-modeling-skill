@@ -76,10 +76,22 @@ class WorkflowContractTests(unittest.TestCase):
         self.assertEqual(
             {
                 "optional": True,
-                "requires_paper_request": True,
+                "requires_trusted_paper_request": True,
+                "requires_current_question_dependencies": True,
                 "requires_paper_writing": True,
             },
             guards["paper-production"],
+        )
+        self.assertEqual(
+            {
+                "optional": True,
+                "requires_trusted_paper_request": True,
+                "requires_current_question_dependencies": True,
+                "requires_validation_pass": True,
+                "requires_gate3": True,
+                "requires_no_invalidated_inputs": True,
+            },
+            guards["paper-writing"],
         )
 
     def test_workflow_points_to_authoritative_non_exhaustive_policy(self) -> None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import math
 import re
@@ -50,6 +51,34 @@ _QUESTION_RE = re.compile(r"^Q[1-9][0-9]*$")
 _UTC_RE = re.compile(
     r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]+)?Z$"
 )
+GATE_SCOPE_KINDS = {
+    "gate1": frozenset({"problem-analysis"}),
+    "gate2": frozenset({"model-specification"}),
+    "gate3": frozenset(
+        {"result-contract", "run-manifest", "validation-manifest", "figure-manifest"}
+    ),
+}
+GATE_REQUIRED_SCOPE_KINDS = {
+    "gate1": frozenset({"problem-analysis"}),
+    "gate2": frozenset({"model-specification"}),
+    "gate3": frozenset({"result-contract", "run-manifest", "validation-manifest"}),
+}
+
+
+def user_event_challenge_sha256(event_type: str, payload: object) -> str:
+    """Hash the canonical challenge an external user-event verifier must attest."""
+
+    errors = strict_json_tree_errors(payload)
+    if errors:
+        raise ValueError("user event challenge is not strict JSON: " + "; ".join(errors))
+    encoded = json.dumps(
+        {"event_type": event_type, "payload": payload},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _reject_json_constant(constant: str) -> object:
@@ -598,11 +627,62 @@ def _validate_initialization(payload: object, errors: list[str]) -> None:
         errors.append("created_at must be a UTC timestamp ending in Z")
 
 
+def _validate_gate_artifact_scope(
+    value: object, gate_id: object, path: str, errors: list[str]
+) -> list[dict[str, object]] | None:
+    if type(value) is not list:
+        errors.append(f"{path} must be an array")
+        return None
+    normalized: list[dict[str, object]] = []
+    seen_paths: set[str] = set()
+    seen_hashes: set[str] = set()
+    allowed_kinds = GATE_SCOPE_KINDS.get(gate_id, frozenset())
+    for index, item in enumerate(value):
+        item_path = f"{path}[{index}]"
+        scope = _object(
+            item,
+            path=item_path,
+            required=("path", "kind", "sha256"),
+            allowed=("path", "kind", "sha256"),
+            errors=errors,
+        )
+        if scope is None:
+            continue
+        artifact_path = scope.get("path")
+        kind = scope.get("kind")
+        digest = scope.get("sha256")
+        _safe_relative_path(artifact_path, f"{item_path}.path", errors)
+        _nonempty_string(kind, f"{item_path}.kind", errors)
+        if _is_string(kind) and allowed_kinds and kind not in allowed_kinds:
+            errors.append(f"{item_path}.kind is not relevant to {gate_id}")
+        if not _is_string(digest) or _HASH_RE.fullmatch(digest) is None:
+            errors.append(f"{item_path}.sha256 must be a SHA-256 digest")
+        if _is_string(artifact_path):
+            if artifact_path in seen_paths:
+                errors.append(f"{item_path}.path duplicates {artifact_path!r}")
+            seen_paths.add(artifact_path)
+        if _is_string(digest):
+            if digest in seen_hashes:
+                errors.append(f"{item_path}.sha256 duplicates {digest!r}")
+            seen_hashes.add(digest)
+        if (
+            _is_nonempty_string(artifact_path)
+            and _is_nonempty_string(kind)
+            and _is_string(digest)
+            and _HASH_RE.fullmatch(digest) is not None
+        ):
+            normalized.append(
+                {"path": artifact_path, "kind": kind, "sha256": digest}
+            )
+    return sorted(normalized, key=lambda item: (str(item["kind"]), str(item["path"])))
+
+
 def _validate_gate(payload: object, errors: list[str]) -> None:
     required_fields = (
         "schema_version",
         "gate_id",
         "status",
+        "artifact_scope",
         "artifact_hashes",
         "notes",
         "rollback_stage",
@@ -633,6 +713,9 @@ def _validate_gate(payload: object, errors: list[str]) -> None:
     confirmation = root.get("confirmation")
     if has_confirmation:
         _validate_gate_confirmation(confirmation, errors, path="confirmation")
+    scope = _validate_gate_artifact_scope(
+        root.get("artifact_scope"), root.get("gate_id"), "artifact_scope", errors
+    )
     hashes = root.get("artifact_hashes")
     if type(hashes) is not list:
         errors.append("artifact_hashes must be an array")
@@ -662,14 +745,37 @@ def _validate_gate(payload: object, errors: list[str]) -> None:
             )
         if type(hashes) is list and not hashes:
             errors.append("artifact_hashes must not be empty when status is confirmed")
-        if type(confirmation) is dict:
-            if confirmation.get("confirmed_by") != confirmer:
-                errors.append("confirmation.confirmed_by must exactly match confirmed_by")
-            if confirmation.get("confirmed_at") != confirmed_at:
-                errors.append("confirmation.confirmed_at must exactly match confirmed_at")
-            if confirmation.get("artifact_hashes") != hashes:
+        if type(scope) is list:
+            if not scope:
+                errors.append("artifact_scope must not be empty when status is confirmed")
+            kinds = {entry["kind"] for entry in scope}
+            required_kinds = GATE_REQUIRED_SCOPE_KINDS.get(root.get("gate_id"), frozenset())
+            missing_kinds = sorted(required_kinds - kinds)
+            if missing_kinds:
                 errors.append(
-                    "confirmation.artifact_hashes must exactly match artifact_hashes"
+                    f"artifact_scope is missing required {root.get('gate_id')} kinds: "
+                    + ", ".join(missing_kinds)
+                )
+            scope_hashes = [entry["sha256"] for entry in scope]
+            if hashes != scope_hashes:
+                errors.append(
+                    "artifact_hashes must exactly match artifact_scope SHA-256 values"
+                )
+        if type(confirmation) is dict:
+            if confirmation.get("actor_id") != confirmer:
+                errors.append("confirmation.actor_id must exactly match confirmed_by")
+            if confirmation.get("occurred_at") != confirmed_at:
+                errors.append("confirmation.occurred_at must exactly match confirmed_at")
+            if type(scope) is list and confirmation.get("challenge_sha256") != user_event_challenge_sha256(
+                "gate-confirmation",
+                {
+                    "schema_version": "2",
+                    "gate_id": root.get("gate_id"),
+                    "artifact_scope": scope,
+                },
+            ):
+                errors.append(
+                    "confirmation.challenge_sha256 must exactly bind the gate artifact scope"
                 )
     else:
         if has_confirmer:
@@ -685,13 +791,30 @@ def _validate_gate(payload: object, errors: list[str]) -> None:
 def _validate_gate_confirmation(
     payload: object, errors: list[str], *, path: str = ""
 ) -> None:
+    _validate_trusted_user_event(
+        payload,
+        errors,
+        path=path,
+        expected_event_type="gate-confirmation",
+    )
+
+
+def _validate_trusted_user_event(
+    payload: object,
+    errors: list[str],
+    *,
+    path: str,
+    expected_event_type: str,
+) -> None:
     fields = (
         "schema_version",
-        "actor_type",
-        "confirmation_method",
-        "confirmed_by",
-        "confirmed_at",
-        "artifact_hashes",
+        "provenance_type",
+        "provider",
+        "event_id",
+        "event_type",
+        "actor_id",
+        "occurred_at",
+        "challenge_sha256",
     )
     root = _object(
         payload,
@@ -704,35 +827,228 @@ def _validate_gate_confirmation(
         return
     if root.get("schema_version") != "2" or not _is_string(root.get("schema_version")):
         errors.append(f'{_path(path, "schema_version")} must be exactly the string "2"')
-    if root.get("actor_type") != "user" or not _is_string(root.get("actor_type")):
-        errors.append(f'{_path(path, "actor_type")} must be exactly "user"')
-    if (
-        root.get("confirmation_method") != "explicit"
-        or not _is_string(root.get("confirmation_method"))
+    if root.get("provenance_type") != "trusted_user_event" or not _is_string(
+        root.get("provenance_type")
     ):
         errors.append(
-            f'{_path(path, "confirmation_method")} must be exactly "explicit"'
+            f'{_path(path, "provenance_type")} must be exactly "trusted_user_event"'
         )
-    _nonempty_string(root.get("confirmed_by"), _path(path, "confirmed_by"), errors)
-    if not _is_utc_timestamp(root.get("confirmed_at")):
+    for field in ("provider", "event_id", "actor_id"):
+        _nonempty_string(root.get(field), _path(path, field), errors)
+    if root.get("event_type") != expected_event_type or not _is_string(
+        root.get("event_type")
+    ):
         errors.append(
-            f'{_path(path, "confirmed_at")} must be a UTC timestamp ending in Z'
+            f'{_path(path, "event_type")} must be exactly "{expected_event_type}"'
         )
-    hashes = root.get("artifact_hashes")
-    hash_path = _path(path, "artifact_hashes")
-    if type(hashes) is not list:
-        errors.append(f"{hash_path} must be an array")
-    else:
-        if not hashes:
-            errors.append(f"{hash_path} must not be empty")
+    if not _is_utc_timestamp(root.get("occurred_at")):
+        errors.append(
+            f'{_path(path, "occurred_at")} must be a UTC timestamp ending in Z'
+        )
+    challenge = root.get("challenge_sha256")
+    if not _is_string(challenge) or _HASH_RE.fullmatch(challenge) is None:
+        errors.append(
+            f'{_path(path, "challenge_sha256")} must be a SHA-256 digest'
+        )
+
+
+def _validate_accepted_model_interface(payload: object, errors: list[str]) -> None:
+    fields = (
+        "schema_version",
+        "status",
+        "model_id",
+        "specification",
+        "inputs",
+        "outputs",
+    )
+    root = _object(
+        payload,
+        path="",
+        required=fields,
+        allowed=fields,
+        errors=errors,
+    )
+    if root is None:
+        return
+    if root.get("schema_version") != "2" or not _is_string(root.get("schema_version")):
+        errors.append('schema_version must be exactly the string "2"')
+    if root.get("status") != "accepted" or not _is_string(root.get("status")):
+        errors.append('status must be exactly "accepted"')
+    _nonempty_string(root.get("model_id"), "model_id", errors)
+    specification = _object(
+        root.get("specification"),
+        path="specification",
+        required=("path", "sha256"),
+        allowed=("path", "sha256"),
+        errors=errors,
+    )
+    if specification is not None:
+        _safe_relative_path(specification.get("path"), "specification.path", errors)
+        digest = specification.get("sha256")
+        if not _is_string(digest) or _HASH_RE.fullmatch(digest) is None:
+            errors.append("specification.sha256 must be a SHA-256 digest")
+    for field in ("inputs", "outputs"):
+        values = root.get(field)
+        if type(values) is not list:
+            errors.append(f"{field} must be an array")
+            continue
+        if not values:
+            errors.append(f"{field} must not be empty")
         seen: set[str] = set()
-        for index, digest in enumerate(hashes):
-            if not _is_string(digest) or _HASH_RE.fullmatch(digest) is None:
-                errors.append(f"{hash_path}[{index}] must be a SHA-256 digest")
-            elif digest in seen:
-                errors.append(f"{hash_path}[{index}] duplicates {digest!r}")
-            else:
-                seen.add(digest)
+        for index, value in enumerate(values):
+            item_path = f"{field}[{index}]"
+            _nonempty_string(value, item_path, errors)
+            if _is_string(value):
+                if value in seen:
+                    errors.append(f"{item_path} duplicates {value!r}")
+                seen.add(value)
+
+
+def _validate_paper_request(payload: object, errors: list[str]) -> None:
+    fields = ("schema_version", "requested", "deliverables", "request_event")
+    root = _object(
+        payload,
+        path="",
+        required=fields,
+        allowed=fields,
+        errors=errors,
+    )
+    if root is None:
+        return
+    if root.get("schema_version") != "2" or not _is_string(root.get("schema_version")):
+        errors.append('schema_version must be exactly the string "2"')
+    requested = root.get("requested")
+    if type(requested) is not bool:
+        errors.append("requested must be a boolean")
+    deliverables = root.get("deliverables")
+    allowed_deliverables = ("paper-writing", "paper-production")
+    if type(deliverables) is not list:
+        errors.append("deliverables must be an array")
+    else:
+        seen: set[str] = set()
+        for index, value in enumerate(deliverables):
+            item_path = f"deliverables[{index}]"
+            _enum(value, allowed_deliverables, item_path, errors)
+            if _is_string(value):
+                if value in seen:
+                    errors.append(f"{item_path} duplicates {value!r}")
+                seen.add(value)
+        if requested is True and not deliverables:
+            errors.append("deliverables must not be empty when paper is requested")
+        if requested is False and deliverables:
+            errors.append("deliverables must be empty when paper is not requested")
+    _validate_trusted_user_event(
+        root.get("request_event"),
+        errors,
+        path="request_event",
+        expected_event_type="paper-request",
+    )
+    event = root.get("request_event")
+    if type(event) is dict and type(requested) is bool and type(deliverables) is list:
+        expected_challenge = user_event_challenge_sha256(
+            "paper-request",
+            {
+                "schema_version": "2",
+                "requested": requested,
+                "deliverables": deliverables,
+            },
+        )
+        if event.get("challenge_sha256") != expected_challenge:
+            errors.append(
+                "request_event.challenge_sha256 must exactly bind the paper request"
+            )
+
+
+def _validate_question_version_evidence(payload: object, errors: list[str]) -> None:
+    fields = ("schema_version", "active_iteration", "questions")
+    root = _object(
+        payload,
+        path="",
+        required=fields,
+        allowed=fields,
+        errors=errors,
+    )
+    if root is None:
+        return
+    if root.get("schema_version") != "2" or not _is_string(root.get("schema_version")):
+        errors.append('schema_version must be exactly the string "2"')
+    active_iteration = root.get("active_iteration")
+    if not _is_string(active_iteration) or _ITERATION_RE.fullmatch(active_iteration) is None:
+        errors.append("active_iteration must match vNNN")
+    questions = root.get("questions")
+    if type(questions) is not list:
+        errors.append("questions must be an array")
+        return
+    if not questions:
+        errors.append("questions must not be empty")
+    seen_questions: set[str] = set()
+    seen_manifests: set[str] = set()
+    for index, value in enumerate(questions):
+        item_path = f"questions[{index}]"
+        question = _object(
+            value,
+            path=item_path,
+            required=(
+                "question_id",
+                "source_iteration",
+                "dependency_manifest",
+                "status",
+            ),
+            allowed=(
+                "question_id",
+                "source_iteration",
+                "dependency_manifest",
+                "status",
+            ),
+            errors=errors,
+        )
+        if question is None:
+            continue
+        question_id = question.get("question_id")
+        source_iteration = question.get("source_iteration")
+        if not _is_string(question_id) or _QUESTION_RE.fullmatch(question_id) is None:
+            errors.append(f"{item_path}.question_id must match Q<number>")
+        elif question_id in seen_questions:
+            errors.append(f"{item_path}.question_id duplicates {question_id!r}")
+        else:
+            seen_questions.add(question_id)
+        if not _is_string(source_iteration) or _ITERATION_RE.fullmatch(source_iteration) is None:
+            errors.append(f"{item_path}.source_iteration must match vNNN")
+        if question.get("status") != "current" or not _is_string(question.get("status")):
+            errors.append(f'{item_path}.status must be exactly "current"')
+        manifest = _object(
+            question.get("dependency_manifest"),
+            path=f"{item_path}.dependency_manifest",
+            required=("path", "sha256"),
+            allowed=("path", "sha256"),
+            errors=errors,
+        )
+        if manifest is None:
+            continue
+        manifest_path = manifest.get("path")
+        _safe_relative_path(
+            manifest_path, f"{item_path}.dependency_manifest.path", errors
+        )
+        digest = manifest.get("sha256")
+        if not _is_string(digest) or _HASH_RE.fullmatch(digest) is None:
+            errors.append(
+                f"{item_path}.dependency_manifest.sha256 must be a SHA-256 digest"
+            )
+        if _is_string(manifest_path):
+            if manifest_path in seen_manifests:
+                errors.append(
+                    f"{item_path}.dependency_manifest.path duplicates {manifest_path!r}"
+                )
+            seen_manifests.add(manifest_path)
+            if _is_string(question_id) and _is_string(source_iteration):
+                expected_path = (
+                    f"iterations/{source_iteration}/manifests/"
+                    f"{question_id}-dependencies.json"
+                )
+                if manifest_path != expected_path:
+                    errors.append(
+                        f"{item_path}.dependency_manifest.path must be {expected_path!r}"
+                    )
 
 
 def _validate_external_data_approval(payload: object, errors: list[str]) -> None:
@@ -839,6 +1155,9 @@ def validate_document(
         "initialization": _validate_initialization,
         "gate": _validate_gate,
         "gate-confirmation": _validate_gate_confirmation,
+        "accepted-model-interface": _validate_accepted_model_interface,
+        "paper-request": _validate_paper_request,
+        "question-version-evidence": _validate_question_version_evidence,
         "external-data-approval": _validate_external_data_approval,
         "official-verification": _validate_official_verification,
     }

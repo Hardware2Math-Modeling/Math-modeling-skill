@@ -171,13 +171,16 @@ def make_valid_suite(root):
             },
             "paper-writing": {
                 "optional": True,
+                "requires_trusted_paper_request": True,
+                "requires_current_question_dependencies": True,
                 "requires_validation_pass": True,
                 "requires_gate3": True,
                 "requires_no_invalidated_inputs": True,
             },
             "paper-production": {
                 "optional": True,
-                "requires_paper_request": True,
+                "requires_trusted_paper_request": True,
+                "requires_current_question_dependencies": True,
                 "requires_paper_writing": True,
             },
         },

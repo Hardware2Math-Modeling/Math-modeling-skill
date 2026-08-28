@@ -13,16 +13,16 @@ Before routing:
 
 1. Read [workflow.json](references/workflow.json), then [handoff-contract.md](references/handoff-contract.md).
 2. Load an existing handoff through the v1-to-v2 migration contract when necessary, then runtime-validate the strict-v2 result before using it. Preserve the faithful prompt, equations, artifacts, failed runs, warnings, decisions, and validation evidence.
-3. Load `current.json`, its `question_sources`, current artifact manifests, `qa/gates.json`, and staleness evidence when a project exists. `current.json` is a pointer, not proof that a gate is confirmed.
+3. Load `current.json`, its `question_sources`, current artifact manifests, `qa/gates.json`, the accepted-model interface, paper-request event, question-version evidence, and staleness evidence when a project exists. `current.json` is a pointer, not proof that a gate is confirmed. Every current `question_sources` entry needs one `question-version-evidence.schema.json` record bound to its canonical current `question-dependency-manifest` path and hash.
 4. For CUMCM, read [cumcm.json](references/competition-packs/cumcm.json). It contains defaults, not current-year rules.
 
-The transitions and `guards` in `workflow.json` are a compact index, not an exhaustive permission check. Its `authorization_policy` names `scripts/orchestrator_policy.py:authorization_errors` as authoritative. Before any action supported by that evaluator, pass the parsed current records to it and proceed only when it returns no errors; a missing or malformed record is blocking, never an invitation to infer evidence.
+The transitions and `guards` in `workflow.json` are a compact index, not an exhaustive permission check. Its `authorization_policy` names `scripts/orchestrator_policy.py:authorization_errors` as authoritative. Before any action supported by that evaluator, pass the parsed current records to it and proceed only when it returns no errors; a missing or malformed record is blocking, never an invitation to infer evidence. Gate and paper-request receipts also require the host-owned trusted-user-event verifier, and official claims require the host-owned official-source verifier. A caller-created dictionary, file, boolean, or verifier placeholder is non-authorizing.
 
 For a new task, construct the canonical handoff before invoking a stage. For an existing task, continue from current evidence rather than restarting completed work without an evidence-backed reason.
 
 ## CUMCM verification boundary
 
-The pack intentionally has `official_sources: []`. Until a user-provided official source, or an official rule or template, has undergone read-only verification and a record runtime-validates against `official-verification.schema.json`, do not claim current-rule compliance or submission-ready status. Before either claim, require `authorization_errors("current-rule-claim", evidence)` or `authorization_errors("submission-readiness", evidence)` to return no blockers with that record under `official_verification`. That record binds an absolute HTTP(S) URL, real UTC verification date and timestamp, and lowercase content SHA-256 to CUMCM and the rule/template type. A filename or free-form source string is non-authorizing. Never infer a year, submission URL, rule, or license from the competition name or an unofficial template.
+The pack intentionally has `official_sources: []`. Until an official rule or template has undergone read-only verification and a record runtime-validates against `official-verification.schema.json`, do not claim current-rule, current-template, submission-ready, or project-complete status. `current-rule-claim`, `submission-readiness`, and `project-complete` require `source_type: rule`; `current-template-claim` requires `source_type: template`. The policy must call the host official-source verifier over the exact CUMCM/type/URL/UTC verification date/content SHA-256 fields and receive literal `true`; schema shape, a `.invalid` host, a filename, or a free-form source is non-authorizing. Never infer a year, submission URL, rule, or license from the competition name or an unofficial template.
 
 External modeling data has a different boundary: require an approval that runtime-validates against `external-data-approval.schema.json` before any download. A URL, prior use, urgency, or team authority is not approval.
 
@@ -33,18 +33,18 @@ Invoke exactly the stage whose entry condition is satisfied:
 1. Invoke `$math-modeling-preflight` first for every new problem and before invoking problem analysis. New work or missing current preflight evidence always routes here; resume or skip only when an existing handoff records that stage complete and current evidence includes the user-provided absolute Python path. If that path is missing, pause: do not guess it, do not resolve PATH, and do not switch to another interpreter.
 2. Invoke `$math-modeling-problem-analysis` only after current preflight. It produces the question, objective, constraint, unit, external-data-need, and model-changing-assumption evidence for Gate 1. Gate 1 after problem analysis and assumptions, and before model construction.
 3. Invoke `$math-modeling-data-analysis` when supplied or approved external data is relevant. Skip only when no relevant data work exists and the recorded skip guard is satisfied. Unapproved external data pauses at `needs_revision`.
-4. Invoke `$math-modeling-model-construction` after Gate 1 has an exact current confirmed record. Gate 2 after model, baseline, and validation plan, and before solving.
-5. Invoke `$math-modeling-model-solving` only after Gate 2 has an exact current confirmed record and the accepted model interface is explicit.
+4. Invoke `$math-modeling-model-construction` after Gate 1 has an exact current confirmed record and strict question-version evidence covers every current question source. Gate 2 after model, baseline, and validation plan, and before solving.
+5. Invoke `$math-modeling-model-solving` only after Gate 2 has an exact current confirmed record, the iteration and model construction remain current, and `accepted-model-interface.schema.json` binds the accepted model id and exact current model-specification artifact.
 6. Invoke `$math-modeling-visualization` whenever a result, diagnostic, or paper claim requires a figure. Skip only with the explicit no-figure guard; any figure claim requires a current verified figure manifest before validation.
 7. Invoke `$math-modeling-validation` only from current solver and figure evidence. Gate 3 after current validation, results, and figures. Validation failure or inconclusive evidence remains `needs_revision`.
-8. Invoke `$math-modeling-paper-writing` only for a requested paper with a current validation pass, Gate 3 confirmed before paper-writing by an exact current record, and no invalidated inputs.
-9. Invoke `$math-modeling-paper-production` only for a requested paper with all paper-writing guards plus current complete paper content. Missing or incomplete content is `needs_revision`, not production completion.
+8. Invoke `$math-modeling-paper-writing` only when `paper-request.schema.json` records the deliverable and its exact request payload is reverified through the host user-event boundary, with a current validation pass, Gate 3 confirmed before paper-writing by an exact current record, and no invalidated inputs.
+9. Invoke `$math-modeling-paper-production` only when that trusted request includes `paper-production`, all paper-writing guards hold, and current complete paper content is available. Missing or incomplete content is `needs_revision`, not production completion.
 
 After each return, merge the updated handoff without discarding `task.statement`, `task.objectives`, `task.constraints`, equations, variable definitions, units, provenance, assumptions, accepted or rejected model alternatives, artifact paths, failed runs, `quality.warnings`, `quality.confidence`, or validation evidence. Treat `next.rationale` and `next.alternatives` as recommendations, then apply the workflow guards yourself.
 
 ## Exact gates and pauses
 
-A confirmed Gate 1, Gate 2, or Gate 3 is the latest applicable record in `qa/gates.json` that runtime-validates against `references/schemas/gate.schema.json`: exact gate id and `confirmed` status, confirmer, UTC timestamp, one or more artifact hashes, notes, rollback field, schema version, and explicit user confirmation provenance validated against `gate-confirmation.schema.json`. The nested provenance must say `actor_type: user` and `confirmation_method: explicit` and bind the exact same artifact hashes; agent/stage output, an arbitrary confirmer string, Oral approval, or a `current.json` gate status never satisfies a gate.
+A confirmed Gate 1, Gate 2, or Gate 3 is the latest applicable record in `qa/gates.json` that runtime-validates against `references/schemas/gate.schema.json`. Its canonical `artifact_scope` is the exact complete set of current artifacts relevant to that gate, and `artifact_hashes` exactly follows that scope. Its `confirmation` is a `gate-confirmation.schema.json` trusted-user-event receipt whose challenge hash binds the gate id and canonical scope. Both recording and authorization must ask the host verifier to resolve the opaque event id and exact challenge; agent/stage output, a caller-authored receipt/file, arbitrary confirmer or verifier placeholder, Oral approval, or `current.json.gates` never satisfies a gate. Gate 3 ignores unrelated paper artifacts created after its confirmation.
 
 | Evidence state | Required action |
 | --- | --- |
@@ -52,8 +52,8 @@ A confirmed Gate 1, Gate 2, or Gate 3 is the latest applicable record in `qa/gat
 | Model-changing ambiguity | `pause` at problem analysis or the earliest affected stage for user confirmation. |
 | Missing/false external-data approval | `needs_revision`; no download. |
 | Missing, rejected, or stale gate record | `needs_revision`; stay or roll back to that gate's owning stage. |
-| Template conflict | `pause` paper production at `needs_revision`; do not silently choose a conflicting template. |
-| Page-gate failure | `pause` paper production at `needs_revision`; never mark the project complete. |
+| template conflict | `pause` paper production at `needs_revision`; do not silently choose a conflicting template. |
+| page-gate failure | `pause` paper production at `needs_revision`; never mark the project complete. |
 
 Unknown, failure, `needs_revision`, rejected, pending, or stale evidence cannot authorize a forward route or `complete`.
 
@@ -82,4 +82,4 @@ Choose the earliest stage invalidated by the evidence; if the cause is not yet s
 
 ## Completion
 
-The final response must summarize the accepted model, supporting evidence, validation result and thresholds, limitations, artifact paths, and unresolved questions. Paper production can be complete only with current complete paper content and its production checks; a template conflict, page-gate failure, missing content, or any invalidated input remains `needs_revision`. If paper writing was not requested, state that it was intentionally omitted; if evidence remains missing, report the gap rather than filling it with a plausible value.
+The final response must summarize the accepted model, supporting evidence, validation result and thresholds, limitations, artifact paths, and unresolved questions. Before marking the project complete, require `authorization_errors("project-complete", ...)` to return no blockers. If paper was requested, completion and submission readiness consume the complete Task 9 `paper_finalization.json` envelope: exact active-iteration path, canonical record hash, current `paper-finalization` handoff artifact, and the shared Task 9 record validator—not one URL, hash, or readiness boolean. If the trusted request explicitly says no paper, completion instead requires current model construction, solving, accepted interface, dependency evidence, and validation with no invalidation; state that paper was intentionally omitted. Missing evidence is reported, never plausibly filled.

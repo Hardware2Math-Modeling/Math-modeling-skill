@@ -1033,6 +1033,276 @@ def _utc_timestamp(value: object, label: str) -> str:
     return value
 
 
+def paper_finalization_sha256(payload: object) -> str:
+    """Return the hash of the canonical immutable finalization record bytes."""
+
+    return hashlib.sha256(_canonical_json_bytes(payload)).hexdigest()
+
+
+def validate_paper_finalization_record(payload: object) -> list[str]:
+    """Validate every published Task 9 readiness field and internal path binding."""
+
+    strict_errors = strict_json_tree_errors(payload)
+    if strict_errors:
+        return [f"paper finalization: {error}" for error in strict_errors]
+    if type(payload) is not dict:
+        return ["paper finalization must be an object"]
+    errors: list[str] = []
+
+    def exact_object(
+        value: object, fields: set[str], label: str
+    ) -> dict[str, object] | None:
+        if type(value) is not dict:
+            errors.append(f"{label} must be an object")
+            return None
+        if set(value) != fields:
+            errors.append(f"{label} fields are not exact")
+        return value
+
+    def digest(value: object, label: str) -> None:
+        if type(value) is not str or _HASH_RE.fullmatch(value) is None:
+            errors.append(f"{label} must be a SHA-256 digest")
+
+    def relative_path(value: object, label: str) -> str | None:
+        try:
+            return safe_relative_path(value, label).as_posix()
+        except ValueError as error:
+            errors.append(str(error))
+            return None
+
+    root_fields = {
+        "schema_version",
+        "manifest_type",
+        "iteration",
+        "created_at",
+        "status",
+        "submission_ready",
+        "readiness_authority",
+        "candidate_manifest",
+        "candidate_pdf",
+        "review_request",
+        "render_manifest",
+        "visual_review",
+    }
+    root = exact_object(payload, root_fields, "paper finalization")
+    assert root is not None
+    if root.get("schema_version") != "1":
+        errors.append('paper finalization schema_version must be exactly "1"')
+    if root.get("manifest_type") != "paper_finalization":
+        errors.append(
+            'paper finalization manifest_type must be exactly "paper_finalization"'
+        )
+    iteration = root.get("iteration")
+    if type(iteration) is not str or _ITERATION_RE.fullmatch(iteration) is None:
+        errors.append("paper finalization iteration must use canonical vNNN form")
+    try:
+        _utc_timestamp(root.get("created_at"), "paper finalization created_at")
+    except ValueError as error:
+        errors.append(str(error))
+    if root.get("status") != "pass":
+        errors.append('paper finalization status must be exactly "pass"')
+    if type(root.get("submission_ready")) is not bool or root.get(
+        "submission_ready"
+    ) is not True:
+        errors.append("paper finalization submission_ready must be exactly true")
+    if type(root.get("readiness_authority")) is not bool or root.get(
+        "readiness_authority"
+    ) is not True:
+        errors.append("paper finalization readiness_authority must be exactly true")
+
+    bindings = (
+        ("candidate_manifest", "paper_manifest.json"),
+        ("candidate_pdf", "paper.pdf"),
+        ("review_request", "visual_review_request.json"),
+    )
+    for field, filename in bindings:
+        binding = exact_object(root.get(field), {"path", "sha256"}, field)
+        if binding is None:
+            continue
+        path = relative_path(binding.get("path"), f"{field}.path")
+        digest(binding.get("sha256"), f"{field}.sha256")
+        if type(iteration) is str:
+            expected = f"iterations/{iteration}/paper/{filename}"
+            if path != expected:
+                errors.append(f"{field}.path must be exactly {expected!r}")
+
+    render = exact_object(
+        root.get("render_manifest"),
+        {"path", "sha256", "renderer", "pages"},
+        "render_manifest",
+    )
+    if render is not None:
+        render_path = relative_path(render.get("path"), "render_manifest.path")
+        digest(render.get("sha256"), "render_manifest.sha256")
+        if type(iteration) is str:
+            expected_render = (
+                f"iterations/{iteration}/paper/paper_render_manifest.json"
+            )
+            if render_path != expected_render:
+                errors.append(
+                    f"render_manifest.path must be exactly {expected_render!r}"
+                )
+        renderer_fields = {
+            "name",
+            "status",
+            "path",
+            "sha256",
+            "version_command",
+            "version_exit_code",
+            "version_signature",
+            "version_output",
+            "version_output_sha256",
+            "trust_basis",
+        }
+        renderer = exact_object(
+            render.get("renderer"), renderer_fields, "render_manifest.renderer"
+        )
+        if renderer is not None:
+            renderer_path = renderer.get("path")
+            if (
+                type(renderer_path) is not str
+                or not renderer_path.strip()
+                or not Path(renderer_path).is_absolute()
+                or ".." in Path(renderer_path).parts
+                or Path(renderer_path).name != "pdftoppm"
+            ):
+                errors.append(
+                    "render_manifest.renderer.path must be an absolute pdftoppm path"
+                )
+            if renderer.get("name") != "pdftoppm":
+                errors.append('render_manifest.renderer.name must be exactly "pdftoppm"')
+            if renderer.get("status") != "available":
+                errors.append(
+                    'render_manifest.renderer.status must be exactly "available"'
+                )
+            digest(renderer.get("sha256"), "render_manifest.renderer.sha256")
+            if renderer.get("version_command") != [renderer_path, "-v"]:
+                errors.append(
+                    "render_manifest.renderer.version_command must match the renderer path"
+                )
+            if type(renderer.get("version_exit_code")) is not int or renderer.get(
+                "version_exit_code"
+            ) != 0:
+                errors.append(
+                    "render_manifest.renderer.version_exit_code must be exactly zero"
+                )
+            signature = renderer.get("version_signature")
+            output = renderer.get("version_output")
+            if (
+                type(signature) is not str
+                or _POPPLER_VERSION_RE.fullmatch(signature) is None
+            ):
+                errors.append(
+                    "render_manifest.renderer.version_signature must be a Poppler signature"
+                )
+            if type(output) is not str or not output:
+                errors.append("render_manifest.renderer.version_output must be nonempty")
+            elif type(signature) is str and _poppler_signature(output) != signature:
+                errors.append(
+                    "render_manifest.renderer.version_output must match version_signature"
+                )
+            output_hash = renderer.get("version_output_sha256")
+            digest(
+                output_hash,
+                "render_manifest.renderer.version_output_sha256",
+            )
+            if type(output) is str and output and output_hash != hashlib.sha256(
+                output.encode("utf-8")
+            ).hexdigest():
+                errors.append(
+                    "render_manifest.renderer.version_output_sha256 is mismatched"
+                )
+            if renderer.get("trust_basis") != _RENDERER_TRUST_BASIS:
+                errors.append(
+                    "render_manifest.renderer.trust_basis is not current preflight evidence"
+                )
+
+        pages = render.get("pages")
+        if type(pages) is not list or not pages:
+            errors.append("render_manifest.pages must be a nonempty array")
+        else:
+            page_paths: set[str] = set()
+            attempt_prefix: str | None = None
+            for index, value in enumerate(pages, start=1):
+                page = exact_object(
+                    value,
+                    {"page", "path", "sha256", "width_px", "height_px"},
+                    f"render_manifest.pages[{index - 1}]",
+                )
+                if page is None:
+                    continue
+                if type(page.get("page")) is not int or page.get("page") != index:
+                    errors.append(
+                        "render_manifest.pages must be consecutively numbered from one"
+                    )
+                page_path = relative_path(
+                    page.get("path"), f"render_manifest.pages[{index - 1}].path"
+                )
+                if page_path is not None:
+                    if page_path in page_paths:
+                        errors.append("render_manifest page paths must be unique")
+                    page_paths.add(page_path)
+                    match = re.fullmatch(
+                        rf"iterations/{re.escape(str(iteration))}/paper/"
+                        rf"render-attempts/(attempt-[0-9]{{3,}})/pages/"
+                        rf"page-{index:03d}\.png",
+                        page_path,
+                    )
+                    if match is None:
+                        errors.append(
+                            f"render_manifest.pages[{index - 1}].path is not canonical"
+                        )
+                    elif attempt_prefix is None:
+                        attempt_prefix = match.group(1)
+                    elif match.group(1) != attempt_prefix:
+                        errors.append(
+                            "render_manifest pages must come from one render attempt"
+                        )
+                digest(
+                    page.get("sha256"),
+                    f"render_manifest.pages[{index - 1}].sha256",
+                )
+                for dimension in ("width_px", "height_px"):
+                    size = page.get(dimension)
+                    if type(size) is not int or size <= 0:
+                        errors.append(
+                            f"render_manifest.pages[{index - 1}].{dimension} "
+                            "must be a positive integer"
+                        )
+
+    review = exact_object(
+        root.get("visual_review"),
+        {"path", "sha256", "reviewer", "reviewed_at", "checklist"},
+        "visual_review",
+    )
+    if review is not None:
+        relative_path(review.get("path"), "visual_review.path")
+        digest(review.get("sha256"), "visual_review.sha256")
+        reviewer = review.get("reviewer")
+        if type(reviewer) is not str or not reviewer.strip():
+            errors.append("visual_review.reviewer must be a nonempty string")
+        try:
+            _utc_timestamp(review.get("reviewed_at"), "visual_review.reviewed_at")
+        except ValueError as error:
+            errors.append(str(error))
+        checklist = exact_object(
+            review.get("checklist"),
+            {
+                "blank_pages",
+                "cropping",
+                "garbled_text",
+                "overlap",
+                "abnormal_font_or_hidden_padding",
+            },
+            "visual_review.checklist",
+        )
+        if checklist is not None and any(
+            type(value) is not str or value != "pass" for value in checklist.values()
+        ):
+            errors.append("every visual_review checklist item must exactly pass")
+    return errors
+
+
 def _publication_transaction_id(manifest_bytes: bytes, request_bytes: bytes) -> str:
     digest = hashlib.sha256()
     for content in (manifest_bytes, request_bytes):

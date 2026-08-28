@@ -16,7 +16,14 @@ from pathlib import Path
 from typing import Sequence
 from uuid import uuid4
 
-from handoff_schema import load_and_validate, load_json_strict, validate_document
+from handoff_schema import (
+    GATE_REQUIRED_SCOPE_KINDS,
+    GATE_SCOPE_KINDS,
+    load_and_validate,
+    load_json_strict,
+    user_event_challenge_sha256,
+    validate_document,
+)
 from manifest import (
     atomic_write_json,
     relative_regular_files,
@@ -392,8 +399,11 @@ def record_gate(
     gate_id: str,
     status: str,
     confirmer: str | None,
-    artifact_hashes: Sequence[str],
+    artifact_hashes: Sequence[str] = (),
     note: str,
+    artifact_scope: Sequence[dict[str, object]] | None = None,
+    confirmation_event_id: str | None = None,
+    trusted_user_event_verifier: object | None = None,
     confirmation: dict[str, object] | None = None,
 ) -> dict[str, object]:
     """Append one auditable gate record and return the updated gate report."""
@@ -415,31 +425,92 @@ def record_gate(
         raise ValueError("artifact hashes must contain SHA-256 digests")
     if len(set(hashes)) != len(hashes):
         raise ValueError("artifact hashes must not contain duplicates")
-    if status == "confirmed":
-        if confirmation is None:
-            raise ValueError(
-                "confirmed gates require an explicit user confirmation provenance record"
-            )
-        validated_confirmation = _validate_payload(
-            confirmation, "gate-confirmation"
+    if confirmation is not None:
+        raise ValueError("self-authored confirmation dictionaries are non-authorizing")
+    raw_scope = [] if artifact_scope is None else artifact_scope
+    if type(raw_scope) not in (list, tuple):
+        raise ValueError("gate artifact scope must be a sequence")
+    normalized_scope: list[dict[str, object]] = []
+    for index, item in enumerate(raw_scope):
+        if type(item) is not dict or set(item) != {"path", "kind", "sha256"}:
+            raise ValueError(f"gate artifact scope[{index}] fields are not exact")
+        path = safe_relative_path(item.get("path"), f"gate artifact scope[{index}] path")
+        kind = item.get("kind")
+        digest = item.get("sha256")
+        if type(kind) is not str or kind not in GATE_SCOPE_KINDS[gate_id]:
+            raise ValueError(f"gate artifact scope[{index}] kind is not relevant to {gate_id}")
+        if type(digest) is not str or _HASH_RE.fullmatch(digest) is None:
+            raise ValueError(f"gate artifact scope[{index}] hash is invalid")
+        normalized_scope.append(
+            {"path": path.as_posix(), "kind": kind, "sha256": digest}
         )
-        confirmed_by = validated_confirmation["confirmed_by"]
-        confirmed_hashes = validated_confirmation["artifact_hashes"]
-        assert type(confirmed_by) is str and type(confirmed_hashes) is list
-        if confirmer is not None and confirmer.strip() != confirmed_by:
-            raise ValueError("confirmer must exactly match confirmation.confirmed_by")
-        if confirmed_hashes != hashes:
+    normalized_scope.sort(key=lambda item: (str(item["kind"]), str(item["path"])))
+    if len({item["path"] for item in normalized_scope}) != len(normalized_scope):
+        raise ValueError("gate artifact scope paths must be unique")
+    scope_hashes = [str(item["sha256"]) for item in normalized_scope]
+    if hashes != scope_hashes:
+        raise ValueError("artifact hashes must exactly match the normalized gate artifact scope")
+    if status == "confirmed":
+        if (
+            type(confirmation_event_id) is not str
+            or not confirmation_event_id.strip()
+            or trusted_user_event_verifier is None
+        ):
             raise ValueError(
-                "confirmation artifact hashes must exactly match gate artifact hashes"
+                "confirmed gates require a trusted user event id and host verifier"
             )
-    elif confirmation is not None:
-        raise ValueError("confirmation is allowed only for a confirmed gate")
+        missing_kinds = GATE_REQUIRED_SCOPE_KINDS[gate_id] - {
+            str(item["kind"]) for item in normalized_scope
+        }
+        if missing_kinds:
+            raise ValueError(
+                f"gate artifact scope is missing required {gate_id} kinds: "
+                + ", ".join(sorted(missing_kinds))
+            )
+        challenge = user_event_challenge_sha256(
+            "gate-confirmation",
+            {
+                "schema_version": SCHEMA_VERSION,
+                "gate_id": gate_id,
+                "artifact_scope": normalized_scope,
+            },
+        )
+        verify = getattr(trusted_user_event_verifier, "verify_user_event", None)
+        if not callable(verify):
+            raise ValueError("trusted user event verifier interface is invalid")
+        try:
+            verified = verify(
+                event_id=confirmation_event_id,
+                event_type="gate-confirmation",
+                challenge_sha256=challenge,
+            )
+        except Exception as error:
+            raise ValueError(f"trusted user event verification failed: {error}") from error
+        if type(verified) is not dict:
+            raise ValueError("trusted user event was not verified")
+        validated_confirmation = _validate_payload(verified, "gate-confirmation")
+        if (
+            validated_confirmation.get("event_id") != confirmation_event_id
+            or validated_confirmation.get("challenge_sha256") != challenge
+        ):
+            raise ValueError("trusted user event receipt does not bind this gate challenge")
+        confirmed_by = validated_confirmation["actor_id"]
+        assert type(confirmed_by) is str
+        if confirmer is not None and confirmer.strip() != confirmed_by:
+            raise ValueError("confirmer must exactly match the verified event actor")
+        confirmation = copy.deepcopy(validated_confirmation)
+    elif any(
+        value is not None
+        for value in (confirmation, confirmation_event_id, trusted_user_event_verifier)
+    ):
+        raise ValueError("confirmation evidence is allowed only for a confirmed gate")
 
     timestamp = utc_now()
     record = {
         "schema_version": SCHEMA_VERSION,
         "gate_id": gate_id,
         "status": status,
+        "artifact_scope": normalized_scope,
         "artifact_hashes": hashes,
         "notes": note,
         "rollback_stage": ROLLBACK_STAGES[gate_id] if status == "rejected" else None,
@@ -448,8 +519,8 @@ def record_gate(
         assert confirmation is not None
         record.update(
             {
-                "confirmed_by": confirmation["confirmed_by"],
-                "confirmed_at": confirmation["confirmed_at"],
+                "confirmed_by": confirmation["actor_id"],
+                "confirmed_at": confirmation["occurred_at"],
                 "confirmation": copy.deepcopy(confirmation),
             }
         )
@@ -603,8 +674,12 @@ def _parser() -> argparse.ArgumentParser:
     gate.add_argument("--status", required=True)
     gate.add_argument("--confirmer")
     gate.add_argument("--artifact-hash", action="append", default=[])
+    gate.add_argument(
+        "--artifact-scope-file",
+        type=_absolute_cli_path,
+        help="Gate scope only; confirmed status also requires a host verifier integration.",
+    )
     gate.add_argument("--note", default="")
-    gate.add_argument("--confirmation-file", type=_absolute_cli_path)
 
     stale = subparsers.add_parser("stale")
     stale.add_argument("project_root", type=_absolute_cli_path)
@@ -634,22 +709,22 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
             result = project / "iterations" / version / "state/iteration.json"
         elif args.command == "gate":
-            confirmation = (
-                load_and_validate(
-                    _regular_file(args.confirmation_file, "confirmation file"),
-                    kind="gate-confirmation",
+            artifact_scope = None
+            if args.artifact_scope_file is not None:
+                raw_scope = load_json_strict(
+                    _regular_file(args.artifact_scope_file, "gate artifact scope file")
                 )
-                if args.confirmation_file is not None
-                else None
-            )
+                if type(raw_scope) is not list:
+                    raise ValueError("gate artifact scope file must contain an array")
+                artifact_scope = raw_scope
             record_gate(
                 project,
                 gate_id=args.gate_id,
                 status=args.status,
                 confirmer=args.confirmer,
                 artifact_hashes=args.artifact_hash,
+                artifact_scope=artifact_scope,
                 note=args.note,
-                confirmation=confirmation,
             )
             result = project / "qa/gates.json"
         else:

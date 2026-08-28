@@ -103,13 +103,15 @@ next:
 
 `workflow.json` transitions and `guards` are a compact routing index and explicitly set `workflow_guards_exhaustive: false`. They never authorize an action by themselves. `scripts/orchestrator_policy.py:authorization_errors` is the machine-readable authority over the parsed records for its supported actions:
 
-- model construction and solving require current preflight/initialization evidence plus the exact applicable confirmed gate;
+- model construction and solving require current preflight/initialization evidence, exact current question-version/dependency bindings, and the exact applicable confirmed gate;
+- model solving additionally requires a strict accepted-model interface bound to the handoff's accepted model and exact current model-specification artifact;
 - paper writing additionally requires current passing validation with no invalidated inputs;
-- paper production additionally requires complete frozen content and a passing conflict-free template check;
+- paper writing and production require a strict paper-request record whose exact request challenge is reverified by the host; production additionally requires the `paper-production` deliverable, complete frozen content, and a passing conflict-free template check;
 - accepting the paper page gate additionally requires the exact passing page-gate evaluator record; project completion remains subject to every later production/finalization check;
+- submission readiness and paper-requested project completion delegate to the complete current Task 9 `paper_finalization.json` record through its shared validator and canonical envelope hash; an explicitly no-paper completion still requires current model/interface/dependency/validation evidence and no invalidation;
 - external-data download requires the strict external-data approval record.
 
-The evaluator runtime-validates the handoff, current iteration, initialization, gate provenance, and approval records; binds the diagnosed Python path to initialization; binds gate hashes to current handoff artifacts; and recomputes the page decision from its recorded counts. Any returned error blocks the action. Callers must not treat an omitted workflow JSON boolean, `current.json` status, or a stage recommendation as substitute authorization.
+The evaluator runtime-validates the handoff, current iteration, initialization, gate provenance, accepted-model interface, paper request, question-version evidence, official source record, approvals, and Task 9 authority. It binds the diagnosed Python path to initialization, every question source to one current dependency manifest, gate scope to all and only current gate-relevant artifacts, and finalization to the active-iteration handoff artifact. User-event and official-source records authorize only when their host-owned verifier is actually called and returns the exact required result. Any returned error blocks the action. Callers must not treat an omitted workflow JSON boolean, `current.json` status, self-authored receipt/file, arbitrary verifier object, or stage recommendation as substitute authorization.
 
 ## Project iterations and staleness
 
@@ -131,7 +133,7 @@ An input, code, parameter, or method change affecting a question creates a new i
 
 ## Official rule and template verification
 
-The CUMCM pack's empty `official_sources` is non-authorizing. A current-rule, current-template, compliance, or submission-readiness claim requires a separately materialized record that runtime-validates against `references/schemas/official-verification.schema.json`. Call the authoritative policy as `authorization_errors("current-rule-claim", evidence)` or `authorization_errors("submission-readiness", evidence)` with the record at `evidence.official_verification`; any returned error blocks the claim. It binds CUMCM and the rule/template type to an absolute HTTP(S) official URL, a real UTC verification time, and the lowercase SHA-256 of the retrieved content. A local filename, free-form source, search summary, or missing/malformed field pauses the claim. The example URL and values below demonstrate shape only; they do not identify or verify a real official source.
+The CUMCM pack's empty `official_sources` is non-authorizing. A current-rule, current-template, compliance, submission-readiness, or project-complete claim requires a separately materialized record that runtime-validates against `references/schemas/official-verification.schema.json` and a successful call to the host-owned official-source verifier. `current-rule-claim`, `submission-readiness`, and `project-complete` require `source_type: rule`; `current-template-claim` requires `source_type: template`. The verifier receives the exact competition/type/URL/time/content-hash fields and must return literal `true`. A local filename, `.invalid` host, free-form source, search summary, schema shape alone, missing verifier, or malformed field pauses the claim. The example URL and values below demonstrate shape only; they do not identify or verify a real official source.
 
 ### Official verification record
 
@@ -148,7 +150,7 @@ The CUMCM pack's empty `official_sources` is non-authorizing. A current-rule, cu
 
 ## Confirmation gate records
 
-`qa/gates.json` preserves an append-only record history. For a gate to authorize a route, use the latest applicable record and runtime-validate it with `references/schemas/gate.schema.json`. A confirmed record has exactly the shape below: schema version, gate id/status, confirmer, real UTC confirmation time, at least one current artifact SHA-256, notes, rollback field, and an explicit user confirmation provenance record that runtime-validates against `references/schemas/gate-confirmation.schema.json`. The provenance has `actor_type: user`, `confirmation_method: explicit`, and hashes exactly matching the gate; it must be captured from direct user confirmation, never inferred or supplied by stage/model output. The values below demonstrate shape only and never assert a real confirmation.
+`qa/gates.json` preserves an append-only record history. For a gate to authorize a route, use the latest applicable record and runtime-validate it with `references/schemas/gate.schema.json`. A confirmed record contains the exact canonical set of every current gate-relevant artifact; `artifact_hashes` follows that scope in canonical kind/path order. Its `gate-confirmation.schema.json` receipt is returned by a host-owned verifier for an opaque event id and a challenge SHA-256 over the exact gate id and scope. A caller-authored dictionary or file is self-attestation even if its labels say “user.” The shape-only values below never assert a real confirmation.
 
 ### gate1 confirmed record
 
@@ -159,14 +161,23 @@ The CUMCM pack's empty `official_sources` is non-authorizing. A current-rule, cu
   "status": "confirmed",
   "confirmed_by": "example-reviewer",
   "confirmed_at": "2000-01-01T00:00:00Z",
+  "artifact_scope": [
+    {
+      "path": "artifacts/problem-analysis.json",
+      "kind": "problem-analysis",
+      "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+    }
+  ],
   "artifact_hashes": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],
   "confirmation": {
     "schema_version": "2",
-    "actor_type": "user",
-    "confirmation_method": "explicit",
-    "confirmed_by": "example-reviewer",
-    "confirmed_at": "2000-01-01T00:00:00Z",
-    "artifact_hashes": ["aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"]
+    "provenance_type": "trusted_user_event",
+    "provider": "shape-only-host-boundary",
+    "event_id": "shape-only-gate1-event",
+    "event_type": "gate-confirmation",
+    "actor_id": "example-reviewer",
+    "occurred_at": "2000-01-01T00:00:00Z",
+  "challenge_sha256": "e1666a241148992948f1194de6c2c89ac1219fb30e2cc76eeeb79e4dc2a2f0c9"
   },
   "notes": "Shape-only example for problem and assumption evidence.",
   "rollback_stage": null
@@ -182,14 +193,23 @@ The CUMCM pack's empty `official_sources` is non-authorizing. A current-rule, cu
   "status": "confirmed",
   "confirmed_by": "example-reviewer",
   "confirmed_at": "2000-01-01T00:00:00Z",
+  "artifact_scope": [
+    {
+      "path": "artifacts/model-specification.json",
+      "kind": "model-specification",
+      "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+    }
+  ],
   "artifact_hashes": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"],
   "confirmation": {
     "schema_version": "2",
-    "actor_type": "user",
-    "confirmation_method": "explicit",
-    "confirmed_by": "example-reviewer",
-    "confirmed_at": "2000-01-01T00:00:00Z",
-    "artifact_hashes": ["bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"]
+    "provenance_type": "trusted_user_event",
+    "provider": "shape-only-host-boundary",
+    "event_id": "shape-only-gate2-event",
+    "event_type": "gate-confirmation",
+    "actor_id": "example-reviewer",
+    "occurred_at": "2000-01-01T00:00:00Z",
+  "challenge_sha256": "d40f6b93a0e4dab0f1576e63f5d97a2f4ae0d7edcb6a56735421ffc7a22c9e6e"
   },
   "notes": "Shape-only example for model, baseline, and validation-plan evidence.",
   "rollback_stage": null
@@ -205,21 +225,120 @@ The CUMCM pack's empty `official_sources` is non-authorizing. A current-rule, cu
   "status": "confirmed",
   "confirmed_by": "example-reviewer",
   "confirmed_at": "2000-01-01T00:00:00Z",
-  "artifact_hashes": ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"],
+  "artifact_scope": [
+    {
+      "path": "artifacts/q1-figure-manifest.json",
+      "kind": "figure-manifest",
+      "sha256": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "path": "artifacts/q1-result-contract.json",
+      "kind": "result-contract",
+      "sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    },
+    {
+      "path": "artifacts/q1-run-manifest.json",
+      "kind": "run-manifest",
+      "sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    },
+    {
+      "path": "artifacts/q1-validation-manifest.json",
+      "kind": "validation-manifest",
+      "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+    }
+  ],
+  "artifact_hashes": [
+    "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+    "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+    "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+    "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+  ],
   "confirmation": {
     "schema_version": "2",
-    "actor_type": "user",
-    "confirmation_method": "explicit",
-    "confirmed_by": "example-reviewer",
-    "confirmed_at": "2000-01-01T00:00:00Z",
-    "artifact_hashes": ["cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"]
+    "provenance_type": "trusted_user_event",
+    "provider": "shape-only-host-boundary",
+    "event_id": "shape-only-gate3-event",
+    "event_type": "gate-confirmation",
+    "actor_id": "example-reviewer",
+    "occurred_at": "2000-01-01T00:00:00Z",
+    "challenge_sha256": "c09c02cca90c7931faa5d9e96c7761cc211bdbab97344e8f83cd66ddf5bd1479"
   },
   "notes": "Shape-only example for current validation, result, and figure evidence.",
   "rollback_stage": null
 }
 ```
 
-Oral permission, stage/model self-attestation, an arbitrary `confirmed_by`, and `current.json.gates` alone do not confirm a gate. `record_gate` requires a separately materialized explicit user provenance record (CLI `--confirmation-file`) and rejects mismatched hashes. Gate 1 follows problem/assumption review; Gate 2 follows model, baseline, parameter-source, and validation-plan review; Gate 3 follows current validation, result, and figure review. Pending, rejected, stale, malformed, hashless, provenance-free, or superseded records do not authorize the next stage.
+Oral permission, stage/model self-attestation, an arbitrary `confirmed_by`, a caller-authored confirmation file, and `current.json.gates` alone do not confirm a gate. `record_gate` accepts only a host verifier plus opaque confirmation event id and rejects a missing verifier, unbound event, partial/reordered hash binding, or incomplete relevant scope. The standalone CLI deliberately has no host-verifier integration, so it fails closed for confirmed status. Gate 1 follows problem/assumption review; Gate 2 follows model, baseline, parameter-source, and validation-plan review; Gate 3 follows current validation, result, run, and optional figure manifests. Later unrelated paper artifacts do not alter Gate 3 scope. Pending, rejected, stale, malformed, hashless, provenance-free, or superseded records do not authorize the next stage.
+
+## Current route prerequisite records
+
+Model and downstream routes use strict records rather than prose claims:
+
+- `accepted-model-interface.schema.json` records `status: accepted`, the exact accepted model id, nonempty inputs/outputs, and the current model-specification path/hash. The id must equal `handoff.result.accepted_model`, and exactly one current `model-specification` artifact must match the binding.
+- `question-version-evidence.schema.json` contains exactly one `status: current` entry for every `current.json.question_sources` key. Each source iteration must match its pointer, and its canonical `iterations/<source>/manifests/<Qn>-dependencies.json` path/hash must match exactly one current `question-dependency-manifest` handoff artifact.
+- `paper-request.schema.json` records the boolean request and exact requested deliverables. Its nested trusted-user-event receipt binds that payload's canonical challenge and must be returned again by the host verifier. Changing a deliverable, using a self-authored receipt, or omitting the verifier blocks paper work.
+
+### Accepted-model interface record
+
+```json
+{
+  "schema_version": "2",
+  "status": "accepted",
+  "model_id": "Linear allocation model",
+  "specification": {
+    "path": "artifacts/model-specification.json",
+    "sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  },
+  "inputs": ["demand"],
+  "outputs": ["allocation"]
+}
+```
+
+### Question-version evidence record
+
+```json
+{
+  "schema_version": "2",
+  "active_iteration": "v001",
+  "questions": [
+    {
+      "question_id": "Q1",
+      "source_iteration": "v001",
+      "dependency_manifest": {
+        "path": "iterations/v001/manifests/Q1-dependencies.json",
+        "sha256": "7777777777777777777777777777777777777777777777777777777777777777"
+      },
+      "status": "current"
+    }
+  ]
+}
+```
+
+### Paper-request record
+
+```json
+{
+  "schema_version": "2",
+  "requested": true,
+  "deliverables": ["paper-writing", "paper-production"],
+  "request_event": {
+    "schema_version": "2",
+    "provenance_type": "trusted_user_event",
+    "provider": "shape-only-host-boundary",
+    "event_id": "shape-only-paper-request-event",
+    "event_type": "paper-request",
+    "actor_id": "example-project-owner",
+    "occurred_at": "2000-01-01T00:00:00Z",
+    "challenge_sha256": "3ce23f65249c9008014a49d5b7e042c004d2a097e54653c9763bb8fed7b886bd"
+  }
+}
+```
+
+## Submission readiness and project completion
+
+`submission-readiness` always requires a trusted requested paper, current Gate 3, current project evidence, official-rule verification, and the Task 9 readiness authority. For `evidence.paper_finalization`, provide exactly `{path, sha256, record}`: `path` is `iterations/<active>/paper/paper_finalization.json`, `sha256` is the hash of Task 9's canonical complete record bytes, and `record` is the entire `paper_finalization` object. The shared `paper_production.validate_paper_finalization_record` checks every finalization field and internal canonical binding; the envelope must also match exactly one current `paper-finalization` handoff artifact. A single `submission_ready` boolean, PDF URL/hash, or partial summary never authorizes readiness.
+
+`project-complete` requires the same official rule boundary. When paper was requested, it uses the same Task 9 authority. When the host-verified request explicitly has `requested: false` and no deliverables, no finalization is required, but current model construction, solving, accepted-model interface, per-question dependency evidence, completed passing validation, a non-stale iteration, and an empty invalidated-stage list remain mandatory.
 
 ## External-data approval
 

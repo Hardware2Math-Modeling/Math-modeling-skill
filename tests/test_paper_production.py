@@ -1754,6 +1754,38 @@ class PaperProductionTests(unittest.TestCase):
         with self.assertRaises(FileExistsError):
             paper_production.finalize_paper(project, "v001", review)
 
+    def test_finalization_record_has_shared_strict_validator(self) -> None:
+        """Catches readiness callers trusting one boolean instead of Task 9 authority."""
+
+        project, _, _, _, _, review, _ = self.prepare_visual_finalization()
+        final = paper_production.finalize_paper(project, "v001", review)
+
+        self.assertEqual(
+            [], paper_production.validate_paper_finalization_record(final)
+        )
+        mutations: list[dict[str, object]] = []
+        extra = json.loads(json.dumps(final))
+        extra["agent_override"] = True
+        mutations.append(extra)
+        not_ready = json.loads(json.dumps(final))
+        not_ready["submission_ready"] = False
+        mutations.append(not_ready)
+        stale_path = json.loads(json.dumps(final))
+        stale_path["candidate_pdf"]["path"] = "paper.pdf"
+        mutations.append(stale_path)
+        incomplete_pages = json.loads(json.dumps(final))
+        incomplete_pages["render_manifest"]["pages"].pop(0)
+        mutations.append(incomplete_pages)
+        failed_review = json.loads(json.dumps(final))
+        failed_review["visual_review"]["checklist"]["cropping"] = "fail"
+        mutations.append(failed_review)
+
+        for payload in mutations:
+            with self.subTest(payload=payload):
+                self.assertTrue(
+                    paper_production.validate_paper_finalization_record(payload)
+                )
+
     def test_finalization_rejects_stale_or_incomplete_visual_evidence(self) -> None:
         cases = (
             "wrong_pdf",

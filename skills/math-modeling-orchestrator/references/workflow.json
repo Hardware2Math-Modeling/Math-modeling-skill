@@ -98,13 +98,16 @@
     },
     "paper-writing": {
       "optional": true,
+      "requires_trusted_paper_request": true,
+      "requires_current_question_dependencies": true,
       "requires_validation_pass": true,
       "requires_gate3": true,
       "requires_no_invalidated_inputs": true
     },
     "paper-production": {
       "optional": true,
-      "requires_paper_request": true,
+      "requires_trusted_paper_request": true,
+      "requires_current_question_dependencies": true,
       "requires_paper_writing": true
     }
   },

@@ -24,15 +24,57 @@ from project_state import (  # noqa: E402
 )
 
 
+def gate_scope(digest: str = "a" * 64) -> list[dict[str, object]]:
+    return [
+        {
+            "path": "artifacts/problem-analysis.json",
+            "kind": "problem-analysis",
+            "sha256": digest,
+        }
+    ]
+
+
+def gate_challenge_sha256(digest: str = "a" * 64) -> str:
+    payload = {
+        "event_type": "gate-confirmation",
+        "payload": {
+            "schema_version": "2",
+            "gate_id": "gate1",
+            "artifact_scope": gate_scope(digest),
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
 def user_confirmation(digest: str = "a" * 64) -> dict[str, object]:
     return {
         "schema_version": "2",
-        "actor_type": "user",
-        "confirmation_method": "explicit",
-        "confirmed_by": "reviewer",
-        "confirmed_at": "2026-08-27T00:00:00Z",
-        "artifact_hashes": [digest],
+        "provenance_type": "trusted_user_event",
+        "provider": "fixture-host-boundary",
+        "event_id": "fixture-gate1-confirmation",
+        "event_type": "gate-confirmation",
+        "actor_id": "reviewer",
+        "occurred_at": "2026-08-27T00:00:00Z",
+        "challenge_sha256": gate_challenge_sha256(digest),
     }
+
+
+class FixtureUserEventVerifier:
+    def __init__(self, receipt: dict[str, object]) -> None:
+        self.receipt = receipt
+
+    def verify_user_event(
+        self, *, event_id: str, event_type: str, challenge_sha256: str
+    ) -> dict[str, object] | None:
+        if (
+            self.receipt.get("event_id") != event_id
+            or self.receipt.get("event_type") != event_type
+            or self.receipt.get("challenge_sha256") != challenge_sha256
+        ):
+            return None
+        return json.loads(json.dumps(self.receipt))
 
 
 class ProjectStateTests(unittest.TestCase):
@@ -193,51 +235,64 @@ class ProjectStateTests(unittest.TestCase):
             status="confirmed",
             confirmer="reviewer",
             artifact_hashes=[digest],
+            artifact_scope=gate_scope(digest),
             note="accepted after review",
-            confirmation=user_confirmation(digest),
+            confirmation_event_id="fixture-gate1-confirmation",
+            trusted_user_event_verifier=FixtureUserEventVerifier(
+                user_confirmation(digest)
+            ),
         )
         self.assertEqual("confirmed", load_current(self.project)["gates"]["gate1"])
         self.assertEqual(1, len(report["records"]))
         self.assertEqual("reviewer", report["records"][0]["confirmed_by"])
         self.assertEqual([digest], report["records"][0]["artifact_hashes"])
+        self.assertEqual(gate_scope(digest), report["records"][0]["artifact_scope"])
         self.assertEqual(user_confirmation(digest), report["records"][0]["confirmation"])
         self.assertEqual("accepted after review", report["records"][0]["notes"])
 
     def test_record_gate_rejects_arbitrary_confirmer_without_user_provenance(self) -> None:
         """Catches stage code confirming a gate with only a fabricated name."""
 
-        with self.assertRaisesRegex(ValueError, "explicit user confirmation"):
+        with self.assertRaisesRegex(ValueError, "trusted user event"):
             record_gate(
                 self.project,
                 gate_id="gate1",
                 status="confirmed",
                 confirmer="fabricated-reviewer",
                 artifact_hashes=["a" * 64],
+                artifact_scope=gate_scope(),
                 note="self-attested by stage output",
             )
         self.assertFalse((self.project / "qa/gates.json").exists())
         self.assertEqual("pending", load_current(self.project)["gates"]["gate1"])
 
-    def test_record_gate_rejects_agent_provenance_and_hash_mismatch(self) -> None:
-        """Catches non-user provenance or confirmation bound to other artifacts."""
+    def test_record_gate_rejects_self_authored_receipt_and_unbound_event(self) -> None:
+        """Catches JSON self-attestation or a trusted event for different evidence."""
 
-        agent = user_confirmation()
-        agent["actor_type"] = "agent"
-        mismatch = user_confirmation("b" * 64)
-        for confirmation, message in (
-            (agent, "actor_type"),
-            (mismatch, "exactly match"),
-        ):
-            with self.subTest(message=message), self.assertRaisesRegex(ValueError, message):
-                record_gate(
-                    self.project,
-                    gate_id="gate1",
-                    status="confirmed",
-                    confirmer="reviewer",
-                    artifact_hashes=["a" * 64],
-                    note="invalid provenance",
-                    confirmation=confirmation,
-                )
+        with self.assertRaisesRegex(ValueError, "self-authored|trusted user event"):
+            record_gate(
+                self.project,
+                gate_id="gate1",
+                status="confirmed",
+                confirmer="reviewer",
+                artifact_hashes=["a" * 64],
+                note="self-authored provenance",
+                confirmation=user_confirmation(),
+            )
+        with self.assertRaisesRegex(ValueError, "trusted user event"):
+            record_gate(
+                self.project,
+                gate_id="gate1",
+                status="confirmed",
+                confirmer="reviewer",
+                artifact_hashes=["a" * 64],
+                artifact_scope=gate_scope(),
+                note="event is bound to different evidence",
+                confirmation_event_id="fixture-gate1-confirmation",
+                trusted_user_event_verifier=FixtureUserEventVerifier(
+                    user_confirmation("b" * 64)
+                ),
+            )
         self.assertFalse((self.project / "qa/gates.json").exists())
 
     def test_nonconfirmed_gate_records_omit_confirmation_evidence(self) -> None:
@@ -529,7 +584,9 @@ class ProjectStateTests(unittest.TestCase):
         )
         self.assertEqual(0, result.returncode, result.stderr)
 
-    def test_cli_confirmed_gate_requires_explicit_user_confirmation_file(self) -> None:
+    def test_cli_confirmed_gate_requires_host_user_event_integration(self) -> None:
+        scope = self.temp_path / "gate-scope.json"
+        scope.write_text(json.dumps(gate_scope()), encoding="utf-8")
         result = subprocess.run(
             [
                 str(Path(sys.executable).resolve()),
@@ -544,6 +601,8 @@ class ProjectStateTests(unittest.TestCase):
                 "fabricated-reviewer",
                 "--artifact-hash",
                 "a" * 64,
+                "--artifact-scope-file",
+                str(scope),
             ],
             cwd=ROOT,
             text=True,
@@ -551,9 +610,9 @@ class ProjectStateTests(unittest.TestCase):
             check=False,
         )
         self.assertNotEqual(0, result.returncode)
-        self.assertIn("explicit user confirmation", result.stderr)
+        self.assertIn("host verifier", result.stderr)
 
-    def test_cli_accepts_valid_user_confirmation_file(self) -> None:
+    def test_cli_rejects_self_authored_user_confirmation_file(self) -> None:
         receipt = self.temp_path / "user-confirmation.json"
         receipt.write_text(json.dumps(user_confirmation()), encoding="utf-8")
         result = subprocess.run(
@@ -578,11 +637,8 @@ class ProjectStateTests(unittest.TestCase):
             capture_output=True,
             check=False,
         )
-        self.assertEqual(0, result.returncode, result.stderr)
-        record = json.loads(
-            (self.project / "qa/gates.json").read_text(encoding="utf-8")
-        )["records"][0]
-        self.assertEqual(user_confirmation(), record["confirmation"])
+        self.assertNotEqual(0, result.returncode)
+        self.assertFalse((self.project / "qa/gates.json").exists())
 
 
 if __name__ == "__main__":

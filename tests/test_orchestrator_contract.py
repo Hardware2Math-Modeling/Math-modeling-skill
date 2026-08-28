@@ -160,23 +160,25 @@ class OrchestratorContractTests(unittest.TestCase):
                     "confirmed_by",
                     "confirmed_at",
                     "confirmation",
+                    "artifact_scope",
                     "artifact_hashes",
                     "notes",
                     "rollback_stage",
                 },
                 set(record),
             )
-            self.assertEqual("user", record["confirmation"]["actor_type"])
             self.assertEqual(
-                "explicit", record["confirmation"]["confirmation_method"]
+                "trusted_user_event",
+                record["confirmation"]["provenance_type"],
             )
             self.assertEqual(
-                record["artifact_hashes"], record["confirmation"]["artifact_hashes"]
+                [item["sha256"] for item in record["artifact_scope"]],
+                record["artifact_hashes"],
             )
         text = ORCHESTRATOR.read_text(encoding="utf-8")
         self.assertIn("Oral approval", text)
         self.assertIn("current.json", text)
-        self.assertIn("explicit user confirmation provenance", text)
+        self.assertIn("host verifier", text)
 
     def test_gate_placement_is_fail_closed(self) -> None:
         """Catches model, solve, or paper routes occurring before their decision gate."""

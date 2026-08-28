@@ -4,7 +4,7 @@
   "title": "Math modeling confirmation gate v2",
   "type": "object",
   "additionalProperties": false,
-  "required": ["schema_version", "gate_id", "status", "artifact_hashes", "notes", "rollback_stage"],
+  "required": ["schema_version", "gate_id", "status", "artifact_scope", "artifact_hashes", "notes", "rollback_stage"],
   "properties": {
     "schema_version": {"const": "2"},
     "gate_id": {"enum": ["gate1", "gate2", "gate3"]},
@@ -12,6 +12,19 @@
     "confirmed_by": {"type": "string", "minLength": 1, "pattern": "\\S"},
     "confirmed_at": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$"},
     "confirmation": {"$ref": "gate-confirmation.schema.json"},
+    "artifact_scope": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "kind", "sha256"],
+        "properties": {
+          "path": {"type": "string", "minLength": 1, "pattern": "\\S"},
+          "kind": {"enum": ["problem-analysis", "model-specification", "result-contract", "run-manifest", "validation-manifest", "figure-manifest"]},
+          "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        }
+      }
+    },
     "artifact_hashes": {
       "type": "array",
       "items": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -34,6 +47,7 @@
           "confirmed_by": {"type": "string", "minLength": 1, "pattern": "\\S"},
           "confirmed_at": {"type": "string", "minLength": 1, "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$"},
           "confirmation": {"$ref": "gate-confirmation.schema.json"},
+          "artifact_scope": {"minItems": 1},
           "artifact_hashes": {"minItems": 1}
         }
       },

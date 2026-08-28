@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import json
 import re
 import subprocess
@@ -69,20 +70,55 @@ def valid_pending_gate() -> dict[str, object]:
         "schema_version": "2",
         "gate_id": "gate1",
         "status": "pending",
+        "artifact_scope": [],
         "artifact_hashes": [],
         "notes": "",
         "rollback_stage": None,
     }
 
 
+def valid_gate_scope(digest: str = "a" * 64) -> list[dict[str, object]]:
+    return [
+        {
+            "path": "artifacts/problem-analysis.json",
+            "kind": "problem-analysis",
+            "sha256": digest,
+        }
+    ]
+
+
+def gate_challenge_sha256(
+    gate_id: str = "gate1", scope: list[dict[str, object]] | None = None
+) -> str:
+    payload = {
+        "event_type": "gate-confirmation",
+        "payload": {
+            "schema_version": "2",
+            "gate_id": gate_id,
+            "artifact_scope": valid_gate_scope() if scope is None else scope,
+        },
+    }
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+
+
 def valid_gate_confirmation(digest: str = "a" * 64) -> dict[str, object]:
+    scope = valid_gate_scope(digest)
     return {
         "schema_version": "2",
-        "actor_type": "user",
-        "confirmation_method": "explicit",
-        "confirmed_by": "reviewer",
-        "confirmed_at": "2026-08-27T00:00:00Z",
-        "artifact_hashes": [digest],
+        "provenance_type": "trusted_user_event",
+        "provider": "fixture-host-boundary",
+        "event_id": "fixture-gate1-confirmation",
+        "event_type": "gate-confirmation",
+        "actor_id": "reviewer",
+        "occurred_at": "2026-08-27T00:00:00Z",
+        "challenge_sha256": gate_challenge_sha256(scope=scope),
     }
 
 
@@ -93,6 +129,7 @@ def valid_confirmed_gate() -> dict[str, object]:
             "status": "confirmed",
             "confirmed_by": "reviewer",
             "confirmed_at": "2026-08-27T00:00:00Z",
+            "artifact_scope": valid_gate_scope(),
             "artifact_hashes": ["a" * 64],
             "confirmation": valid_gate_confirmation(),
         }
@@ -129,6 +166,68 @@ def valid_official_verification() -> dict[str, object]:
         "source_url": "https://example.invalid/shape-only/rules.pdf",
         "verified_at": "2026-08-27T00:00:00Z",
         "content_sha256": "d" * 64,
+    }
+
+
+def valid_accepted_model_interface() -> dict[str, object]:
+    return {
+        "schema_version": "2",
+        "status": "accepted",
+        "model_id": "model-q1-v1",
+        "specification": {
+            "path": "artifacts/model-specification.json",
+            "sha256": "a" * 64,
+        },
+        "inputs": ["demand"],
+        "outputs": ["allocation"],
+    }
+
+
+def valid_paper_request(requested: bool = True) -> dict[str, object]:
+    deliverables = ["paper-writing", "paper-production"] if requested else []
+    challenge_payload = {
+        "schema_version": "2",
+        "requested": requested,
+        "deliverables": deliverables,
+    }
+    challenge = hashlib.sha256(
+        json.dumps(
+            {"event_type": "paper-request", "payload": challenge_payload},
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
+    return {
+        **challenge_payload,
+        "request_event": {
+            "schema_version": "2",
+            "provenance_type": "trusted_user_event",
+            "provider": "fixture-host-boundary",
+            "event_id": "fixture-paper-request",
+            "event_type": "paper-request",
+            "actor_id": "project-owner",
+            "occurred_at": "2026-08-27T00:00:00Z",
+            "challenge_sha256": challenge,
+        },
+    }
+
+
+def valid_question_version_evidence() -> dict[str, object]:
+    return {
+        "schema_version": "2",
+        "active_iteration": "v001",
+        "questions": [
+            {
+                "question_id": "Q1",
+                "source_iteration": "v001",
+                "dependency_manifest": {
+                    "path": "iterations/v001/manifests/Q1-dependencies.json",
+                    "sha256": "b" * 64,
+                },
+                "status": "current",
+            }
+        ],
     }
 
 
@@ -563,19 +662,19 @@ class HandoffSchemaTests(unittest.TestCase):
         )
 
         fabricated = valid_confirmed_gate()
-        fabricated["confirmation"]["actor_type"] = "agent"
+        fabricated["confirmation"]["provenance_type"] = "self_attested"
         self.assertTrue(
             any(
-                "confirmation.actor_type" in error
+                "confirmation.provenance_type" in error
                 for error in validate_document(fabricated, kind="gate")
             )
         )
 
         inferred = valid_confirmed_gate()
-        inferred["confirmation"]["confirmation_method"] = "inferred"
+        inferred["confirmation"]["event_type"] = "stage-output"
         self.assertTrue(
             any(
-                "confirmation.confirmation_method" in error
+                "confirmation.event_type" in error
                 for error in validate_document(inferred, kind="gate")
             )
         )
@@ -584,9 +683,9 @@ class HandoffSchemaTests(unittest.TestCase):
         """Catches confirmation for different evidence authorizing the current gate."""
 
         payload = valid_confirmed_gate()
-        payload["confirmation"]["artifact_hashes"] = ["b" * 64]
+        payload["confirmation"]["challenge_sha256"] = "b" * 64
         errors = validate_document(payload, kind="gate")
-        self.assertTrue(any("exactly match" in error for error in errors))
+        self.assertTrue(any("challenge" in error and "exactly" in error for error in errors))
 
     def test_gate_confirmation_is_a_strict_versioned_document(self) -> None:
         """Catches provenance records that omit the explicit user boundary."""
@@ -598,17 +697,19 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertEqual(
             {
                 "schema_version",
-                "actor_type",
-                "confirmation_method",
-                "confirmed_by",
-                "confirmed_at",
-                "artifact_hashes",
+                "provenance_type",
+                "provider",
+                "event_id",
+                "event_type",
+                "actor_id",
+                "occurred_at",
+                "challenge_sha256",
             },
             set(schema["required"]),
         )
-        self.assertEqual("user", schema["properties"]["actor_type"]["const"])
         self.assertEqual(
-            "explicit", schema["properties"]["confirmation_method"]["const"]
+            "trusted_user_event",
+            schema["properties"]["provenance_type"]["const"],
         )
 
     def test_official_verification_accepts_only_structured_web_source_evidence(self) -> None:
@@ -659,6 +760,50 @@ class HandoffSchemaTests(unittest.TestCase):
         self.assertEqual(
             ["rule", "template"], schema["properties"]["source_type"]["enum"]
         )
+
+    def test_route_prerequisite_records_are_strict_versioned_documents(self) -> None:
+        records = {
+            "accepted-model-interface": valid_accepted_model_interface(),
+            "paper-request": valid_paper_request(),
+            "question-version-evidence": valid_question_version_evidence(),
+        }
+        for kind, payload in records.items():
+            with self.subTest(kind=kind):
+                self.assertEqual([], validate_document(payload, kind=kind))
+                schema = load_schema(kind)
+                self.assertEqual(kind + ".schema.json", schema["$id"])
+                self.assertFalse(schema["additionalProperties"])
+
+                extra = copy.deepcopy(payload)
+                extra["agent_override"] = True
+                self.assertTrue(validate_document(extra, kind=kind))
+                missing = copy.deepcopy(payload)
+                missing.pop(next(iter(schema["required"])))
+                self.assertTrue(validate_document(missing, kind=kind))
+
+    def test_paper_request_binds_trusted_event_and_explicit_deliverables(self) -> None:
+        self.assertEqual([], validate_document(valid_paper_request(False), kind="paper-request"))
+
+        mismatched = valid_paper_request()
+        mismatched["deliverables"] = ["paper-writing"]
+        errors = validate_document(mismatched, kind="paper-request")
+        self.assertTrue(any("challenge" in error for error in errors))
+
+        self_attested = valid_paper_request()
+        self_attested["request_event"]["provenance_type"] = "self_attested"
+        self.assertTrue(validate_document(self_attested, kind="paper-request"))
+
+    def test_question_version_evidence_requires_canonical_dependency_binding(self) -> None:
+        wrong_path = valid_question_version_evidence()
+        wrong_path["questions"][0]["dependency_manifest"]["path"] = (
+            "iterations/v999/manifests/Q1-dependencies.json"
+        )
+        errors = validate_document(wrong_path, kind="question-version-evidence")
+        self.assertTrue(any("dependency_manifest.path" in error for error in errors))
+
+        duplicate = valid_question_version_evidence()
+        duplicate["questions"].append(copy.deepcopy(duplicate["questions"][0]))
+        self.assertTrue(validate_document(duplicate, kind="question-version-evidence"))
 
     def test_confirmed_gate_rejects_non_utc_timestamp(self) -> None:
         payload = valid_confirmed_gate()
@@ -1291,6 +1436,9 @@ class HandoffSchemaTests(unittest.TestCase):
             "manifest",
             "gate",
             "gate-confirmation",
+            "accepted-model-interface",
+            "paper-request",
+            "question-version-evidence",
             "official-verification",
         ):
             with self.subTest(kind=kind):
