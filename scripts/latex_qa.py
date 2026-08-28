@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import os
 import re
 import shutil
@@ -108,6 +107,65 @@ def evaluate_page_gate(
     }
 
 
+def _compressed_object(
+    object_id: int,
+    entry: tuple[int, int, int],
+    objects: dict[int, tuple[int, bytes]],
+) -> tuple[bytes | None, str | None]:
+    stream_id, member_index = entry[1], entry[2]
+    stream_record = objects.get(stream_id)
+    if stream_record is None:
+        return None, "PDF xref stream compressed object references a missing object stream"
+    match = re.fullmatch(
+        rb"\s*<<(.*?)>>\s*stream\r?\n(.*)\r?\nendstream\s*",
+        stream_record[1],
+        re.DOTALL,
+    )
+    if match is None or re.search(rb"/Type\s*/ObjStm\b", match.group(1)) is None:
+        return None, "PDF xref stream compressed object does not reference an ObjStm"
+    dictionary, encoded = match.groups()
+    count_match = re.search(rb"/N\s+(\d+)\b", dictionary)
+    first_match = re.search(rb"/First\s+(\d+)\b", dictionary)
+    length_match = re.search(rb"/Length\s+(\d+)\b", dictionary)
+    if count_match is None or first_match is None or length_match is None:
+        return None, "PDF object stream lacks supported N/First/Length declarations"
+    if int(length_match.group(1)) != len(encoded):
+        return None, "PDF object stream length disagrees with its declaration"
+    if re.search(rb"/Filter\s*/FlateDecode\b", dictionary):
+        try:
+            decoded = zlib.decompress(encoded)
+        except zlib.error:
+            return None, "PDF object stream FlateDecode data is broken"
+    elif re.search(rb"/Filter\b", dictionary):
+        return None, "PDF object stream uses an unsupported filter"
+    else:
+        decoded = encoded
+    count = int(count_match.group(1))
+    first = int(first_match.group(1))
+    if count < 1 or member_index >= count or first > len(decoded):
+        return None, "PDF object stream member declarations are inconsistent"
+    header = decoded[:first].split()
+    if len(header) != count * 2 or any(not token.isdigit() for token in header):
+        return None, "PDF object stream header is malformed"
+    pairs = [
+        (int(header[index]), int(header[index + 1]))
+        for index in range(0, len(header), 2)
+    ]
+    if len({member_id for member_id, _ in pairs}) != count:
+        return None, "PDF object stream contains duplicate member identifiers"
+    payload_size = len(decoded) - first
+    offsets = [offset for _, offset in pairs]
+    if offsets != sorted(offsets) or any(offset < 0 or offset > payload_size for offset in offsets):
+        return None, "PDF object stream member offsets are inconsistent"
+    member_id, start = pairs[member_index]
+    if member_id != object_id:
+        return None, "PDF xref stream compressed object index names the wrong object"
+    end = offsets[member_index + 1] if member_index + 1 < count else payload_size
+    if end <= start:
+        return None, "PDF object stream member has an empty or reversed range"
+    return decoded[first + start : first + end], None
+
+
 def _pdf_objects(data: bytes) -> tuple[dict[int, tuple[int, bytes]], list[str]]:
     errors: list[str] = []
     if not data.startswith(b"%PDF-"):
@@ -194,14 +252,25 @@ def _pdf_objects(data: bytes) -> tuple[dict[int, tuple[int, bytes]], list[str]]:
     if not objects:
         errors.append("PDF contains no complete indirect objects")
         return {}, errors
+    root_id: int | None = None
     if classic_xref:
-        if re.search(rb"trailer\s*<<.*?/Root\s+\d+\s+0\s+R.*?>>", data, re.DOTALL) is None:
+        root_match = re.search(
+            rb"trailer\s*<<.*?/Root\s+(\d+)\s+0\s+R.*?>>",
+            data,
+            re.DOTALL,
+        )
+        if root_match is None:
             errors.append("PDF trailer has no catalog root")
-    elif xref_stream_dictionary is not None and re.search(
-        rb"/Root\s+\d+\s+0\s+R\b", xref_stream_dictionary
-    ) is None:
-        errors.append("PDF xref stream has no catalog root")
+        else:
+            root_id = int(root_match.group(1))
+    elif xref_stream_dictionary is not None:
+        root_match = re.search(rb"/Root\s+(\d+)\s+0\s+R\b", xref_stream_dictionary)
+        if root_match is None:
+            errors.append("PDF xref stream has no catalog root")
+        else:
+            root_id = int(root_match.group(1))
 
+    root_object: bytes | None = None
     if xref_stream_dictionary is not None and xref_entries:
         for object_id, (offset, _) in objects.items():
             entry = xref_entries.get(object_id)
@@ -209,16 +278,26 @@ def _pdf_objects(data: bytes) -> tuple[dict[int, tuple[int, bytes]], list[str]]:
                 errors.append(
                     f"PDF xref stream entry for direct object {object_id} is free or has the wrong offset"
                 )
-        root_match = re.search(rb"/Root\s+(\d+)\s+0\s+R\b", xref_stream_dictionary)
-        if root_match is not None:
-            root_id = int(root_match.group(1))
+        if root_id is not None:
             root_entry = xref_entries.get(root_id)
             if root_entry is None or root_entry[0] not in (1, 2):
                 errors.append("PDF xref stream catalog entry is missing or free")
+            elif root_entry[0] == 1:
+                direct = objects.get(root_id)
+                root_object = direct[1] if direct is not None else None
             elif root_entry[0] == 2:
-                container = objects.get(root_entry[1])
-                if container is None or re.search(rb"/Type\s*/ObjStm\b", container[1]) is None:
-                    errors.append("PDF xref stream catalog object stream is unavailable")
+                root_object, compressed_error = _compressed_object(
+                    root_id, root_entry, objects
+                )
+                if compressed_error is not None:
+                    errors.append(compressed_error)
+    elif root_id is not None:
+        direct = objects.get(root_id)
+        root_object = direct[1] if direct is not None else None
+
+    if root_id is not None:
+        if root_object is None or re.search(rb"/Type\s*/Catalog\b", root_object) is None:
+            errors.append("PDF /Root does not resolve to a Catalog object")
 
     if not errors and classic_xref:
         xref_data = data[xref_offset : eof.start()]
@@ -330,88 +409,6 @@ def _reference_errors(log_paths: Sequence[Path]) -> tuple[list[str], list[dict[s
     return errors, logs
 
 
-def _visual_review(
-    path: Path | None,
-    *,
-    pdf_hash: str,
-    total_pages: int | None,
-) -> tuple[dict[str, object], list[str]]:
-    if path is None:
-        return {
-            "status": "needs_review",
-            "method": "verified_render_review_required",
-            "failed_checks": [],
-        }, []
-    try:
-        safe = _regular_file(path, "visual review")
-
-        def reject_constant(value: str) -> object:
-            raise ValueError(f"non-finite JSON constant: {value}")
-
-        def reject_duplicates(pairs: list[tuple[str, object]]) -> dict[str, object]:
-            result: dict[str, object] = {}
-            for key, value in pairs:
-                if key in result:
-                    raise ValueError(f"duplicate JSON key: {key}")
-                result[key] = value
-            return result
-
-        payload = json.loads(
-            safe.read_text(encoding="utf-8"),
-            parse_constant=reject_constant,
-            object_pairs_hook=reject_duplicates,
-        )
-        if type(payload) is not dict:
-            raise ValueError("visual review must be a JSON object")
-        required = {
-            "status",
-            "pdf_sha256",
-            "page_coverage",
-            "render_evidence",
-            "reviewer",
-        }
-        if set(payload) != required or payload.get("status") != "verified":
-            raise ValueError("visual review fields/status are not exactly verified")
-        if payload.get("pdf_sha256") != pdf_hash:
-            raise ValueError("visual review PDF hash does not match compiled PDF")
-        coverage = payload.get("page_coverage")
-        expected = {"start": 1, "end": total_pages, "pages": total_pages}
-        if type(coverage) is not dict or coverage != expected:
-            raise ValueError("visual review page coverage must include every compiled page")
-        reviewer = payload.get("reviewer")
-        if type(reviewer) is not str or not reviewer.strip():
-            raise ValueError("visual review reviewer must be non-empty")
-        evidence = payload.get("render_evidence")
-        if type(evidence) is not list or not evidence:
-            raise ValueError("visual review render_evidence must be non-empty")
-        rendered: list[dict[str, str]] = []
-        for index, entry in enumerate(evidence):
-            if type(entry) is not dict or set(entry) != {"path", "sha256"}:
-                raise ValueError(f"visual review render_evidence[{index}] is malformed")
-            render = _regular_file(Path(str(entry["path"])), "visual review render evidence")
-            digest = entry.get("sha256")
-            if digest != sha256_file(render):
-                raise ValueError("visual review render evidence hash is stale")
-            rendered.append({"path": str(render), "sha256": str(digest)})
-    except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as error:
-        message = f"visual review is invalid: {error}"
-        return {
-            "status": "fail",
-            "method": "verified_render_review_required",
-            "failed_checks": [message],
-        }, [message]
-    return {
-        "status": "pass",
-        "method": "verified_render_review",
-        "review_path": str(safe),
-        "review_sha256": sha256_file(safe),
-        "reviewer": reviewer.strip(),
-        "page_coverage": coverage,
-        "render_evidence": rendered,
-        "failed_checks": [],
-    }, []
-
-
 def inspect_pdf(
     pdf_path: Path,
     *,
@@ -464,13 +461,6 @@ def inspect_pdf(
             "compiled PDF contains empty or broken pages: "
             + ", ".join(str(page) for page in empty_pages)
         )
-
-    visual_qa, visual_review_errors = _visual_review(
-        visual_review_path,
-        pdf_hash=sha256_file(pdf),
-        total_pages=total_pages,
-    )
-    failed.extend(visual_review_errors)
 
     visual_errors = [
         *structure_errors,
@@ -530,7 +520,11 @@ def inspect_pdf(
                 "failed_checks": visual_errors,
             }
             if visual_errors
-            else visual_qa
+            else {
+                "status": "needs_review",
+                "method": "immutable_post_compile_finalization_required",
+                "failed_checks": [],
+            }
         ),
         "logs": logs,
         "compiled_pdf_authoritative": True,

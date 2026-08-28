@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -71,18 +72,27 @@ def write_xref_stream_pdf(
     *,
     free_object: int | None = None,
     wrong_offset_object: int | None = None,
+    root_is_font: bool = False,
 ) -> None:
     """Write a one-page PDF 1.5 file whose cross-reference is a stream."""
 
     values = [
-        b"<< /Type /Catalog /Pages 2 0 R >>",
+        (
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+            if root_is_font
+            else b"<< /Type /Catalog /Pages 2 0 R >>"
+        ),
         b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
         (
             b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
             b"/Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>"
         ),
         b"<< /Length 38 >>\nstream\nBT /F1 12 Tf 72 720 Td (Page) Tj ET\nendstream",
-        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+        (
+            b"<< /Type /Catalog /Pages 2 0 R >>"
+            if root_is_font
+            else b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+        ),
     ]
     output = bytearray(b"%PDF-1.5\n%\xe2\xe3\xcf\xd3\n")
     offsets = [0]
@@ -112,6 +122,64 @@ def write_xref_stream_pdf(
         ).encode("ascii")
     )
     output.extend(entries)
+    output.extend(b"\nendstream\nendobj\n")
+    output.extend(f"startxref\n{xref_offset}\n%%EOF\n".encode("ascii"))
+    path.write_bytes(output)
+
+
+def write_compressed_root_xref_stream_pdf(
+    path: Path,
+    *,
+    root_is_font: bool = False,
+) -> None:
+    """Write a PDF 1.7 file whose Root is stored in a Flate ObjStm."""
+
+    root = (
+        b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"
+        if root_is_font
+        else b"<< /Type /Catalog /Pages 2 0 R >>"
+    )
+    object_stream = b"1 0 " + root
+    compressed = zlib.compress(object_stream)
+    values = {
+        2: b"<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        3: (
+            b"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            b"/Resources << >> /Contents 4 0 R >>"
+        ),
+        4: b"<< /Length 24 >>\nstream\n0 0 0 rg 72 720 80 20 re f\nendstream",
+        5: (
+            f"<< /Type /ObjStm /N 1 /First 4 /Length {len(compressed)} "
+            "/Filter /FlateDecode >>\nstream\n"
+        ).encode("ascii")
+        + compressed
+        + b"\nendstream",
+    }
+    output = bytearray(b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n")
+    offsets: dict[int, int] = {}
+    for object_id, value in values.items():
+        offsets[object_id] = len(output)
+        output.extend(f"{object_id} 0 obj\n".encode("ascii"))
+        output.extend(value)
+        output.extend(b"\nendobj\n")
+    xref_offset = len(output)
+    offsets[6] = xref_offset
+    entries = [
+        (0, 0, 65535),
+        (2, 5, 0),
+        *((1, offsets[object_id], 0) for object_id in range(2, 7)),
+    ]
+    encoded = b"".join(
+        bytes([kind]) + field_two.to_bytes(4, "big") + field_three.to_bytes(2, "big")
+        for kind, field_two, field_three in entries
+    )
+    output.extend(
+        (
+            f"6 0 obj\n<< /Type /XRef /Size 7 /Root 1 0 R "
+            f"/W [1 4 2] /Length {len(encoded)} >>\nstream\n"
+        ).encode("ascii")
+    )
+    output.extend(encoded)
     output.extend(b"\nendstream\nendobj\n")
     output.extend(f"startxref\n{xref_offset}\n%%EOF\n".encode("ascii"))
     path.write_bytes(output)
@@ -274,6 +342,37 @@ class LatexQATests(unittest.TestCase):
                 self.assertEqual("fail", report["status"])
                 self.assertIn("xref", " ".join(report["failed_checks"]).lower())
 
+    def test_xref_root_must_resolve_to_a_real_catalog(self) -> None:
+        pdf = self.root / "xref-root-is-font.pdf"
+        aux = self.root / "xref-root-is-font.aux"
+        write_xref_stream_pdf(pdf, root_is_font=True)
+        aux.write_text(
+            "\\newlabel{mm-body-start}{{1}{1}}\n"
+            "\\newlabel{mm-body-end}{{8}{1}}\n",
+            encoding="utf-8",
+        )
+        with patch("latex_qa.shutil.which", return_value=None):
+            report = inspect_pdf(pdf, aux_path=aux, log_paths=[])
+        self.assertEqual("fail", report["status"])
+        self.assertIn("catalog", " ".join(report["failed_checks"]).lower())
+
+    def test_xref_stream_compressed_root_resolves_exact_catalog_object(self) -> None:
+        aux = self.root / "compressed-root.aux"
+        aux.write_text(
+            "\\newlabel{mm-body-start}{{1}{1}}\n"
+            "\\newlabel{mm-body-end}{{8}{1}}\n",
+            encoding="utf-8",
+        )
+        for root_is_font, expected in ((False, "needs_revision"), (True, "fail")):
+            pdf = self.root / f"compressed-root-{root_is_font}.pdf"
+            write_compressed_root_xref_stream_pdf(pdf, root_is_font=root_is_font)
+            with self.subTest(root_is_font=root_is_font):
+                with patch("latex_qa.shutil.which", return_value=None):
+                    report = inspect_pdf(pdf, aux_path=aux, log_paths=[])
+                self.assertEqual(expected, report["status"])
+                if root_is_font:
+                    self.assertIn("catalog", " ".join(report["failed_checks"]).lower())
+
     def test_automatic_structure_never_claims_visual_pass(self) -> None:
         pdf = self.root / "page-numbers-only.pdf"
         aux = self.root / "page-numbers-only.aux"
@@ -288,7 +387,7 @@ class LatexQATests(unittest.TestCase):
         self.assertEqual("pass", report["status"])
         self.assertEqual("needs_review", report["visual_qa"]["status"])
 
-    def test_verified_render_review_bound_to_pdf_hash_lifts_visual_status(self) -> None:
+    def test_arbitrary_hashed_bytes_cannot_lift_visual_status(self) -> None:
         pdf = self.root / "reviewed.pdf"
         aux = self.root / "reviewed.aux"
         render = self.root / "render-contact-sheet.png"
@@ -323,8 +422,7 @@ class LatexQATests(unittest.TestCase):
                 log_paths=[],
                 visual_review_path=review,
             )
-        self.assertEqual("pass", report["visual_qa"]["status"])
-        self.assertEqual(sha256_file(review), report["visual_qa"]["review_sha256"])
+        self.assertEqual("needs_review", report["visual_qa"]["status"])
 
 
 if __name__ == "__main__":

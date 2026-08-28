@@ -7,10 +7,12 @@ import hashlib
 import json
 import os
 import re
-import shutil
+import secrets
 import stat
+import struct
 import subprocess
-import tempfile
+import zlib
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
@@ -98,10 +100,6 @@ def _write_new_json(path: Path, payload: object) -> None:
     errors = strict_json_tree_errors(payload)
     if errors:
         raise ValueError("paper manifest is not strict JSON:\n- " + "\n- ".join(errors))
-    target = _absolute(path, "paper manifest output")
-    _directory(target.parent, "paper manifest parent")
-    if target.exists() or target.is_symlink():
-        raise FileExistsError(f"paper manifest already exists: {target}")
     content = json.dumps(
         payload,
         ensure_ascii=False,
@@ -109,50 +107,58 @@ def _write_new_json(path: Path, payload: object) -> None:
         indent=2,
         allow_nan=False,
     ) + "\n"
-    temporary_name: str | None = None
+    _write_new_bytes(path, content.encode("utf-8"), "paper manifest")
+
+
+def _open_directory_fd(path: Path, label: str) -> int:
+    candidate = Path(path)
+    if not candidate.is_absolute() or any(part == ".." for part in candidate.parts):
+        raise ValueError(f"{label} must be an absolute path without '..'")
+    flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open("/", flags)
     try:
-        with tempfile.NamedTemporaryFile(
-            mode="w",
-            encoding="utf-8",
-            dir=target.parent,
-            prefix=f".{target.name}.",
-            suffix=".tmp",
-            delete=False,
-        ) as temporary:
-            temporary_name = temporary.name
-            temporary.write(content)
-            temporary.flush()
-            os.fsync(temporary.fileno())
-        os.link(temporary_name, target)
-    except FileExistsError as error:
-        raise FileExistsError(f"paper manifest already exists: {target}") from error
-    finally:
-        if temporary_name is not None:
-            try:
-                Path(temporary_name).unlink()
-            except FileNotFoundError:
-                pass
+        for part in candidate.parts[1:]:
+            next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+    except OSError as error:
+        os.close(descriptor)
+        raise ValueError(f"{label} must be an existing non-symlink directory") from error
+    return descriptor
 
 
 def _mkdir_new(path: Path, label: str) -> Path:
-    target = _absolute(path, label)
-    _directory(target.parent, f"{label} parent")
+    target = Path(path)
+    if not target.is_absolute() or any(part == ".." for part in target.parts):
+        raise ValueError(f"{label} must be an absolute path without '..'")
+    parent_fd = _open_directory_fd(target.parent, f"{label} parent")
     try:
-        os.mkdir(target)
+        os.mkdir(target.name, dir_fd=parent_fd)
     except FileExistsError as error:
         raise FileExistsError(f"{label} already exists: {target}") from error
-    return _directory(target, label)
+    finally:
+        os.close(parent_fd)
+    descriptor = _open_directory_fd(target, label)
+    os.close(descriptor)
+    return target
 
 
 def _write_new_bytes(path: Path, data: bytes, label: str) -> None:
-    target = _absolute(path, label)
-    _directory(target.parent, f"{label} parent")
+    target = Path(path)
+    if not target.is_absolute() or any(part == ".." for part in target.parts):
+        raise ValueError(f"{label} must be an absolute path without '..'")
+    parent_fd = _open_directory_fd(target.parent, f"{label} parent")
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
+    temporary_name = f".{target.name}.{secrets.token_hex(12)}.tmp"
     descriptor: int | None = None
     try:
-        descriptor = os.open(target, flags, 0o600)
+        descriptor = os.open(temporary_name, flags, 0o600, dir_fd=parent_fd)
         view = memoryview(data)
         while view:
             written = os.write(descriptor, view)
@@ -160,11 +166,26 @@ def _write_new_bytes(path: Path, data: bytes, label: str) -> None:
                 raise OSError("short write while publishing immutable artifact")
             view = view[written:]
         os.fsync(descriptor)
+        os.close(descriptor)
+        descriptor = None
+        os.link(
+            temporary_name,
+            target.name,
+            src_dir_fd=parent_fd,
+            dst_dir_fd=parent_fd,
+            follow_symlinks=False,
+        )
+        os.fsync(parent_fd)
     except FileExistsError as error:
         raise FileExistsError(f"{label} already exists: {target}") from error
     finally:
         if descriptor is not None:
             os.close(descriptor)
+        try:
+            os.unlink(temporary_name, dir_fd=parent_fd)
+        except FileNotFoundError:
+            pass
+        os.close(parent_fd)
 
 
 def _copy_new_file(source: Path, destination: Path, label: str) -> None:
@@ -177,17 +198,30 @@ def _copy_new_file(source: Path, destination: Path, label: str) -> None:
 
 
 def _ensure_subdirectory(root: Path, relative: Path, label: str) -> Path:
-    current = root
-    for part in relative.parts:
-        current = current / part
+    root_path = Path(root)
+    descriptor = _open_directory_fd(root_path, label)
+    try:
+        for part in relative.parts:
+            try:
+                os.mkdir(part, dir_fd=descriptor)
+            except FileExistsError:
+                pass
+            flags = os.O_RDONLY
+            if hasattr(os, "O_DIRECTORY"):
+                flags |= os.O_DIRECTORY
+            if hasattr(os, "O_NOFOLLOW"):
+                flags |= os.O_NOFOLLOW
+            next_descriptor = os.open(part, flags, dir_fd=descriptor)
+            os.close(descriptor)
+            descriptor = next_descriptor
+    except OSError as error:
+        raise ValueError(f"{label} must remain a non-symlink directory tree") from error
+    finally:
         try:
-            os.mkdir(current)
-        except FileExistsError:
+            os.close(descriptor)
+        except OSError:
             pass
-        safe = _directory(current, label)
-        if not safe.is_relative_to(root):
-            raise ValueError(f"{label} escapes destination root")
-    return current
+    return root_path / relative
 
 
 def _template_files(path: Path, label: str) -> tuple[Path, list[Path], str]:
@@ -254,6 +288,12 @@ def select_template(
 
     fallback_root, fallback_files, _ = _template_files(Path(fallback_dir), "fallback template")
     fallback_hash = _tree_hash(fallback_root, fallback_files)
+    fallback_entry = _template_entry(
+        fallback_root,
+        fallback_files,
+        _template_metadata(fallback_root, fallback_files),
+    )
+    fallback_main_hash = sha256_file(fallback_root / fallback_entry)
 
     def inspected(
         candidate: Path,
@@ -269,7 +309,12 @@ def select_template(
             if role == "user":
                 raise
             return None
-        if digest == fallback_hash:
+        fallback_identity = digest == fallback_hash or (
+            len(files) == 1 and sha256_file(root / files[0]) == fallback_main_hash
+        )
+        if fallback_identity:
+            if role not in ("user", "fallback"):
+                return None
             return candidate, root, files, source_kind, metadata, digest, False
         if require_verified:
             required = ("source_url", "license", "verification_date", "sha256")
@@ -345,7 +390,15 @@ def select_template(
 
 
 def _preflight_output_paths(paper: Path) -> None:
-    for relative in ("template", "build", "logs", "paper_manifest.json", "paper.pdf"):
+    for relative in (
+        "template",
+        "build",
+        "logs",
+        "paper_manifest.json",
+        "paper.pdf",
+        "visual_review_request.json",
+        "paper_finalization.json",
+    ):
         target = paper / relative
         if target.exists() or target.is_symlink():
             raise FileExistsError(f"paper production output already exists: {target}")
@@ -579,10 +632,9 @@ def _body(content: dict[str, object]) -> str:
     for number in range(1, 9):
         section = sections[str(number)]
         assert type(section) is dict
-        if number == 1:
-            lines.append("\\phantomsection\\label{mm-body-start}")
         lines.append(f"\\section{{{section['title']}}}")
         if number == 1:
+            lines.append("\\phantomsection\\label{mm-body-start}")
             for subsection in section["subsections"].values():
                 lines.append(f"\\subsection{{{subsection['title']}}}")
                 lines.append(_latex_text(subsection["content"]))
@@ -778,7 +830,7 @@ def _attempt_compilation(
     aux: Path | None = None
     for index, tool in enumerate(tools, start=1):
         attempt_build = build / f"attempt-{index:02d}"
-        attempt_build.mkdir()
+        _mkdir_new(attempt_build, "compiler attempt build directory")
         command = _command(tool, template / main_entry, attempt_build)
         stem = Path(main_entry).stem
         produced_pdf = attempt_build / f"{stem}.pdf"
@@ -928,6 +980,485 @@ def _attempt_compilation(
     return attempts, candidate, aux, all_logs
 
 
+def _project_evidence_file(project: Path, value: object, label: str) -> Path:
+    relative = safe_relative_path(value, label)
+    target = _regular_file(project / relative, label)
+    if not target.is_relative_to(project):
+        raise ValueError(f"{label} escapes project root")
+    return target
+
+
+def _exact_keys(value: object, required: set[str], label: str) -> dict[str, object]:
+    if type(value) is not dict or set(value) != required:
+        raise ValueError(f"{label} fields are not exact")
+    return value
+
+
+def _utc_timestamp(value: object, label: str) -> str:
+    if type(value) is not str or not value.endswith("Z"):
+        raise ValueError(f"{label} must be a UTC timestamp ending in Z")
+    try:
+        parsed = datetime.fromisoformat(value[:-1] + "+00:00")
+    except ValueError as error:
+        raise ValueError(f"{label} must be a real UTC timestamp") from error
+    if parsed.utcoffset() != timezone.utc.utcoffset(parsed):
+        raise ValueError(f"{label} must be UTC")
+    return value
+
+
+def _paeth(left: int, above: int, upper_left: int) -> int:
+    estimate = left + above - upper_left
+    distances = (
+        (abs(estimate - left), left),
+        (abs(estimate - above), above),
+        (abs(estimate - upper_left), upper_left),
+    )
+    return min(distances, key=lambda item: item[0])[1]
+
+
+def _render_png(path: Path) -> tuple[int, int]:
+    data = _regular_file(path, "rendered page PNG").read_bytes()
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise ValueError("rendered page PNG signature is invalid")
+    offset = 8
+    width: int | None = None
+    height: int | None = None
+    channels: int | None = None
+    compressed = bytearray()
+    saw_end = False
+    while offset < len(data):
+        if len(data) - offset < 12:
+            raise ValueError("rendered page PNG chunk header is truncated")
+        length = struct.unpack(">I", data[offset : offset + 4])[0]
+        kind = data[offset + 4 : offset + 8]
+        end = offset + 12 + length
+        if end > len(data):
+            raise ValueError("rendered page PNG chunk is truncated")
+        payload = data[offset + 8 : offset + 8 + length]
+        expected_crc = struct.unpack(">I", data[offset + 8 + length : end])[0]
+        if zlib.crc32(kind + payload) & 0xFFFFFFFF != expected_crc:
+            raise ValueError("rendered page PNG chunk CRC is invalid")
+        if kind == b"IHDR":
+            if width is not None or length != 13:
+                raise ValueError("rendered page PNG IHDR is invalid")
+            width, height, bit_depth, color_type, compression, filtering, interlace = (
+                struct.unpack(">IIBBBBB", payload)
+            )
+            if width <= 0 or height <= 0:
+                raise ValueError("rendered page PNG dimensions must be positive")
+            channel_map = {0: 1, 2: 3, 4: 2, 6: 4}
+            channels = channel_map.get(color_type)
+            if (
+                bit_depth != 8
+                or channels is None
+                or compression != 0
+                or filtering != 0
+                or interlace != 0
+            ):
+                raise ValueError("rendered page PNG encoding is unsupported for audit")
+        elif kind == b"IDAT":
+            compressed.extend(payload)
+        elif kind == b"IEND":
+            if length != 0 or end != len(data):
+                raise ValueError("rendered page PNG IEND/trailing bytes are invalid")
+            saw_end = True
+            break
+        offset = end
+    if width is None or height is None or channels is None or not compressed or not saw_end:
+        raise ValueError("rendered page PNG is incomplete")
+    try:
+        raw = zlib.decompress(bytes(compressed))
+    except zlib.error as error:
+        raise ValueError("rendered page PNG pixels cannot be decompressed") from error
+    stride = width * channels
+    if len(raw) != height * (stride + 1):
+        raise ValueError("rendered page PNG pixel length is inconsistent")
+    previous = bytearray(stride)
+    rows: list[bytearray] = []
+    cursor = 0
+    for _ in range(height):
+        filter_type = raw[cursor]
+        cursor += 1
+        encoded = raw[cursor : cursor + stride]
+        cursor += stride
+        reconstructed = bytearray(stride)
+        for index, byte in enumerate(encoded):
+            left = reconstructed[index - channels] if index >= channels else 0
+            above = previous[index]
+            upper_left = previous[index - channels] if index >= channels else 0
+            if filter_type == 0:
+                predictor = 0
+            elif filter_type == 1:
+                predictor = left
+            elif filter_type == 2:
+                predictor = above
+            elif filter_type == 3:
+                predictor = (left + above) // 2
+            elif filter_type == 4:
+                predictor = _paeth(left, above, upper_left)
+            else:
+                raise ValueError("rendered page PNG uses an invalid row filter")
+            reconstructed[index] = (byte + predictor) & 0xFF
+        rows.append(reconstructed)
+        previous = reconstructed
+    visible = False
+    for row in rows:
+        for offset in range(0, len(row), channels):
+            pixel = row[offset : offset + channels]
+            if channels == 1:
+                colors, alpha = pixel, 255
+            elif channels == 2:
+                colors, alpha = pixel[:1], pixel[1]
+            elif channels == 3:
+                colors, alpha = pixel, 255
+            else:
+                colors, alpha = pixel[:3], pixel[3]
+            if alpha > 0 and any(channel < 250 for channel in colors):
+                visible = True
+                break
+        if visible:
+            break
+    if not visible:
+        raise ValueError("rendered page PNG appears blank or fully transparent")
+    return width, height
+
+
+def _validate_candidate_for_finalization(
+    project: Path, iteration: str
+) -> tuple[Path, dict[str, object], Path, dict[str, object]]:
+    current = load_current(project)
+    if current["active_iteration"] != iteration:
+        raise ValueError("paper finalization iteration must be active")
+    if current.get("status") == "stale":
+        raise ValueError("current project state is stale")
+    gates = current.get("gates")
+    if type(gates) is not dict or gates.get("gate3") != "confirmed":
+        raise ValueError("Gate 3 must remain confirmed for finalization")
+    iteration_root = _directory(project / "iterations" / iteration, "active iteration")
+    _current_validation(iteration_root)
+    _staleness_check(project)
+    paper = _directory(iteration_root / "paper", "active paper directory")
+    finalization = paper / "paper_finalization.json"
+    if finalization.exists() or finalization.is_symlink():
+        raise FileExistsError(f"paper finalization already exists: {finalization}")
+    manifest_path = _regular_file(paper / "paper_manifest.json", "candidate manifest")
+    manifest = _strict_json(manifest_path, "candidate manifest")
+    _exact_keys(
+        manifest,
+        {
+            "schema_version",
+            "manifest_type",
+            "iteration",
+            "created_at",
+            "template",
+            "template_status",
+            "content",
+            "environment",
+            "compiler",
+            "submission_ready",
+            "status",
+            "failed_checks",
+            "pdf",
+            "page_qa",
+            "readiness",
+        },
+        "candidate manifest",
+    )
+    if (
+        manifest.get("schema_version") != "1"
+        or manifest.get("manifest_type") != "paper"
+        or manifest.get("iteration") != iteration
+        or manifest.get("submission_ready") is not False
+        or manifest.get("status") != "pass"
+        or manifest.get("failed_checks") != []
+    ):
+        raise ValueError("candidate manifest is not an immutable passing non-ready candidate")
+    template = manifest.get("template")
+    if type(template) is not dict or template.get("submission_ready_eligible") is not True:
+        raise ValueError("candidate template is not submission-ready eligible")
+    copied_root = safe_relative_path(template.get("copied_root"), "candidate template root")
+    template_root = _directory(project / copied_root, "candidate template root")
+    expected_hashes = template.get("assembled_hashes")
+    if type(expected_hashes) is not dict or any(
+        type(name) is not str
+        or type(digest) is not str
+        or _HASH_RE.fullmatch(digest) is None
+        for name, digest in expected_hashes.items()
+    ):
+        raise ValueError("candidate template hash manifest is invalid")
+    observed_hashes = {
+        relative.as_posix(): sha256_file(template_root / relative)
+        for relative in relative_regular_files(template_root)
+    }
+    if observed_hashes != expected_hashes:
+        raise ValueError("candidate template tree changed after compilation")
+    page_qa = manifest.get("page_qa")
+    if (
+        type(page_qa) is not dict
+        or page_qa.get("status") != "pass"
+        or page_qa.get("failed_checks") != []
+        or type(page_qa.get("total_pages")) is not int
+        or page_qa["total_pages"] < 1
+        or type(page_qa.get("visual_qa")) is not dict
+        or page_qa["visual_qa"].get("status") != "needs_review"
+    ):
+        raise ValueError("candidate page/reference/structure gate is not a passing review request")
+    pdf_record = _exact_keys(
+        manifest.get("pdf"),
+        {
+            "path",
+            "sha256",
+            "byte_size",
+            "compiled_candidate_path",
+            "compiled_candidate_sha256",
+        },
+        "candidate PDF record",
+    )
+    expected_pdf_path = f"iterations/{iteration}/paper/paper.pdf"
+    if pdf_record.get("path") != expected_pdf_path:
+        raise ValueError("candidate PDF path is not the immutable published PDF")
+    pdf = _project_evidence_file(project, pdf_record["path"], "candidate PDF")
+    if (
+        pdf_record.get("sha256") != sha256_file(pdf)
+        or pdf_record.get("byte_size") != pdf.stat(follow_symlinks=False).st_size
+        or page_qa.get("pdf_sha256") != pdf_record.get("sha256")
+    ):
+        raise ValueError("candidate PDF no longer matches its manifest")
+    readiness = _exact_keys(
+        manifest.get("readiness"),
+        {"status", "authority", "review_request"},
+        "candidate readiness record",
+    )
+    request_relative = f"iterations/{iteration}/paper/visual_review_request.json"
+    if (
+        readiness.get("status") != "pending_visual_review"
+        or readiness.get("authority") != f"iterations/{iteration}/paper/paper_finalization.json"
+        or readiness.get("review_request") != request_relative
+    ):
+        raise ValueError("candidate readiness authority/request is invalid")
+    request_path = _project_evidence_file(project, request_relative, "visual review request")
+    request = _strict_json(request_path, "visual review request")
+    _exact_keys(
+        request,
+        {
+            "schema_version",
+            "manifest_type",
+            "iteration",
+            "created_at",
+            "status",
+            "candidate_manifest",
+            "candidate_pdf",
+            "required_page_coverage",
+            "finalization_authority",
+        },
+        "visual review request",
+    )
+    manifest_record = _exact_keys(
+        request.get("candidate_manifest"), {"path", "sha256"}, "request manifest record"
+    )
+    request_pdf = _exact_keys(
+        request.get("candidate_pdf"),
+        {"path", "sha256", "total_pages"},
+        "request PDF record",
+    )
+    total_pages = page_qa["total_pages"]
+    expected_coverage = {"start": 1, "end": total_pages, "pages": total_pages}
+    if (
+        request.get("schema_version") != "1"
+        or request.get("manifest_type") != "paper_visual_review_request"
+        or request.get("iteration") != iteration
+        or request.get("status") != "pending"
+        or manifest_record
+        != {"path": f"iterations/{iteration}/paper/paper_manifest.json", "sha256": sha256_file(manifest_path)}
+        or request_pdf
+        != {"path": pdf_record["path"], "sha256": pdf_record["sha256"], "total_pages": total_pages}
+        or request.get("required_page_coverage") != expected_coverage
+        or request.get("finalization_authority") != readiness["authority"]
+    ):
+        raise ValueError("visual review request is stale or not bound to the candidate")
+    return manifest_path, manifest, request_path, request
+
+
+def finalize_paper(
+    project_root: Path,
+    iteration: str,
+    review_path: Path,
+) -> dict[str, object]:
+    """Create the immutable readiness authority from post-compile render/review evidence."""
+
+    project = _directory(project_root, "project root")
+    if type(iteration) is not str or _ITERATION_RE.fullmatch(iteration) is None:
+        raise ValueError("iteration must use canonical vNNN form")
+    manifest_path, candidate, request_path, request = _validate_candidate_for_finalization(
+        project, iteration
+    )
+    review_file = _regular_file(Path(review_path), "visual review manifest")
+    if not review_file.is_relative_to(project):
+        raise ValueError("visual review manifest must belong to the current project")
+    review = _strict_json(review_file, "visual review manifest")
+    _exact_keys(
+        review,
+        {
+            "schema_version",
+            "manifest_type",
+            "iteration",
+            "status",
+            "pdf_sha256",
+            "render_manifest_path",
+            "render_manifest_sha256",
+            "page_coverage",
+            "checklist",
+            "reviewer",
+            "reviewed_at",
+        },
+        "visual review manifest",
+    )
+    if (
+        review.get("schema_version") != "1"
+        or review.get("manifest_type") != "paper_visual_review"
+        or review.get("iteration") != iteration
+        or review.get("status") != "pass"
+    ):
+        raise ValueError("visual review manifest status/schema is not an exact pass")
+    pdf_record = candidate["pdf"]
+    page_qa = candidate["page_qa"]
+    assert type(pdf_record) is dict and type(page_qa) is dict
+    total_pages = page_qa["total_pages"]
+    expected_coverage = {"start": 1, "end": total_pages, "pages": total_pages}
+    if review.get("pdf_sha256") != pdf_record["sha256"] or review.get("page_coverage") != expected_coverage:
+        raise ValueError("visual review does not cover the exact candidate PDF")
+    reviewer = review.get("reviewer")
+    if type(reviewer) is not str or not reviewer.strip():
+        raise ValueError("visual review reviewer must be nonempty")
+    _utc_timestamp(review.get("reviewed_at"), "visual review reviewed_at")
+    checklist = _exact_keys(
+        review.get("checklist"),
+        {
+            "blank_pages",
+            "cropping",
+            "garbled_text",
+            "overlap",
+            "abnormal_font_or_hidden_padding",
+        },
+        "visual review checklist",
+    )
+    if any(value != "pass" for value in checklist.values()):
+        raise ValueError("every visual review checklist item must explicitly pass")
+    render_file = _project_evidence_file(
+        project, review.get("render_manifest_path"), "render manifest"
+    )
+    if review.get("render_manifest_sha256") != sha256_file(render_file):
+        raise ValueError("visual review render-manifest hash is stale")
+    render = _strict_json(render_file, "render manifest")
+    _exact_keys(
+        render,
+        {
+            "schema_version",
+            "manifest_type",
+            "iteration",
+            "pdf_path",
+            "pdf_sha256",
+            "review_request_path",
+            "review_request_sha256",
+            "total_pages",
+            "renderer",
+            "pages",
+        },
+        "render manifest",
+    )
+    if (
+        render.get("schema_version") != "1"
+        or render.get("manifest_type") != "paper_render"
+        or render.get("iteration") != iteration
+        or render.get("pdf_path") != pdf_record["path"]
+        or render.get("pdf_sha256") != pdf_record["sha256"]
+        or render.get("review_request_path")
+        != f"iterations/{iteration}/paper/visual_review_request.json"
+        or render.get("review_request_sha256") != sha256_file(request_path)
+        or render.get("total_pages") != total_pages
+    ):
+        raise ValueError("render manifest is stale or not bound to the review request/PDF")
+    renderer = _exact_keys(
+        render.get("renderer"), {"name", "version", "method", "command"}, "renderer"
+    )
+    if any(
+        type(renderer.get(field)) is not str or not str(renderer[field]).strip()
+        for field in ("name", "version", "method")
+    ):
+        raise ValueError("renderer identity/method must be nonempty")
+    command = renderer.get("command")
+    if type(command) is not list or not command or any(
+        type(item) is not str or not item for item in command
+    ):
+        raise ValueError("renderer command must be an auditable string array")
+    pages = render.get("pages")
+    if type(pages) is not list or len(pages) != total_pages:
+        raise ValueError("render manifest must contain exactly one PNG per PDF page")
+    observed_pages: list[int] = []
+    observed_paths: set[str] = set()
+    normalized_pages: list[dict[str, object]] = []
+    for index, entry in enumerate(pages):
+        page = _exact_keys(
+            entry,
+            {"page", "path", "sha256", "width_px", "height_px"},
+            f"render page {index}",
+        )
+        page_number = page.get("page")
+        if type(page_number) is not int:
+            raise ValueError("render page number must be an integer")
+        image = _project_evidence_file(project, page.get("path"), "rendered page PNG")
+        relative_image = image.relative_to(project).as_posix()
+        if relative_image in observed_paths:
+            raise ValueError("rendered page PNG paths must be unique")
+        observed_paths.add(relative_image)
+        if page.get("sha256") != sha256_file(image):
+            raise ValueError("rendered page PNG hash is stale")
+        width, height = _render_png(image)
+        if page.get("width_px") != width or page.get("height_px") != height:
+            raise ValueError("rendered page PNG dimensions disagree with the manifest")
+        observed_pages.append(page_number)
+        normalized_pages.append(dict(page))
+    if observed_pages != list(range(1, total_pages + 1)):
+        raise ValueError("rendered page numbers must be unique, consecutive, and complete")
+    finalization_path = project / f"iterations/{iteration}/paper/paper_finalization.json"
+    finalization = {
+        "schema_version": "1",
+        "manifest_type": "paper_finalization",
+        "iteration": iteration,
+        "created_at": utc_now(),
+        "status": "pass",
+        "submission_ready": True,
+        "readiness_authority": True,
+        "candidate_manifest": {
+            "path": manifest_path.relative_to(project).as_posix(),
+            "sha256": sha256_file(manifest_path),
+        },
+        "candidate_pdf": {
+            "path": str(pdf_record["path"]),
+            "sha256": str(pdf_record["sha256"]),
+        },
+        "review_request": {
+            "path": request_path.relative_to(project).as_posix(),
+            "sha256": sha256_file(request_path),
+        },
+        "render_manifest": {
+            "path": render_file.relative_to(project).as_posix(),
+            "sha256": sha256_file(render_file),
+            "renderer": dict(renderer),
+            "pages": normalized_pages,
+        },
+        "visual_review": {
+            "path": review_file.relative_to(project).as_posix(),
+            "sha256": sha256_file(review_file),
+            "reviewer": reviewer.strip(),
+            "reviewed_at": review["reviewed_at"],
+            "checklist": dict(checklist),
+        },
+    }
+    _write_new_json(finalization_path, finalization)
+    return finalization
+
+
 def produce_paper(
     project_root: Path,
     iteration: str,
@@ -964,11 +1495,10 @@ def produce_paper(
         handoff,
         Path(compiler) if compiler is not None else None,
     )
-    visual_review: Path | None = None
     if visual_review_path is not None:
-        visual_review = _regular_file(Path(visual_review_path), "visual review evidence")
-        if not visual_review.is_relative_to(project):
-            raise ValueError("visual review evidence must belong to the current project")
+        raise ValueError(
+            "visual review evidence is accepted only by finalize_paper after compilation"
+        )
     _preflight_output_paths(paper)
 
     fallback = _directory(_BUILTIN_FALLBACK, "built-in fallback template")
@@ -1084,7 +1614,6 @@ def produce_paper(
         candidate,
         aux_path=aux,
         log_paths=final_log,
-        visual_review_path=visual_review,
     )
     pdf_record = {
         "path": _project_relative(project, candidate),
@@ -1103,21 +1632,46 @@ def produce_paper(
         }
 
     status = str(page_qa["status"])
-    submission_ready = bool(
-        status == "pass"
-        and selection["submission_ready_eligible"] is True
-        and page_qa["visual_qa"]["status"] == "pass"
-    )
+    review_request_path = paper / "visual_review_request.json"
+    finalization_path = paper / "paper_finalization.json"
     report = {
         **common,
         "status": status,
         "failed_checks": list(page_qa["failed_checks"]),
         "pdf": pdf_record,
         "page_qa": page_qa,
-        "submission_ready": submission_ready,
+        "submission_ready": False,
+        "readiness": {
+            "status": "pending_visual_review",
+            "authority": _project_relative(project, finalization_path),
+            "review_request": _project_relative(project, review_request_path),
+        },
     }
     _write_new_json(manifest_path, report)
+    request = {
+        "schema_version": "1",
+        "manifest_type": "paper_visual_review_request",
+        "iteration": iteration,
+        "created_at": utc_now(),
+        "status": "pending",
+        "candidate_manifest": {
+            "path": _project_relative(project, manifest_path),
+            "sha256": sha256_file(manifest_path),
+        },
+        "candidate_pdf": {
+            "path": str(pdf_record["path"]),
+            "sha256": str(pdf_record["sha256"]),
+            "total_pages": page_qa["total_pages"],
+        },
+        "required_page_coverage": {
+            "start": 1,
+            "end": page_qa["total_pages"],
+            "pages": page_qa["total_pages"],
+        },
+        "finalization_authority": _project_relative(project, finalization_path),
+    }
+    _write_new_json(review_request_path, request)
     return report
 
 
-__all__ = ["produce_paper", "select_template"]
+__all__ = ["finalize_paper", "produce_paper", "select_template"]

@@ -4,9 +4,11 @@ import json
 import os
 import shutil
 import stat
+import struct
 import sys
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -20,10 +22,33 @@ from manifest import sha256_file  # noqa: E402
 from paper_content import freeze_content  # noqa: E402
 from paper_production import (  # noqa: E402
     _copy_selected_template,
+    _write_new_bytes,
     produce_paper,
     select_template,
 )
+import paper_production  # noqa: E402
 from test_latex_qa import write_text_pdf  # noqa: E402
+
+
+def _png_chunk(kind: bytes, payload: bytes) -> bytes:
+    checksum = zlib.crc32(kind + payload) & 0xFFFFFFFF
+    return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", checksum)
+
+
+def write_render_png(path: Path, *, width: int = 3, height: int = 2, blank: bool = False) -> None:
+    rows = []
+    for y in range(height):
+        pixels = bytearray()
+        for x in range(width):
+            value = 255 if blank else 20 + ((x + y) % 2) * 180
+            pixels.extend((value, value, value))
+        rows.append(b"\x00" + bytes(pixels))
+    path.write_bytes(
+        b"\x89PNG\r\n\x1a\n"
+        + _png_chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0))
+        + _png_chunk(b"IDAT", zlib.compress(b"".join(rows)))
+        + _png_chunk(b"IEND", b"")
+    )
 
 
 def valid_result(metric_hash: str) -> dict[str, object]:
@@ -221,7 +246,14 @@ class PaperProductionTests(unittest.TestCase):
     def test_fallback_identity_cannot_be_laundered_through_user_slot(self) -> None:
         copied = self.root / "copied-fallback"
         shutil.copytree(self.fallback, copied)
-        for candidate in (self.fallback, copied):
+        copied_main = self.root / "copied-fallback-main.tex"
+        shutil.copyfile(self.fallback / "main.tex", copied_main)
+        for candidate in (
+            self.fallback,
+            copied,
+            self.fallback / "main.tex",
+            copied_main,
+        ):
             with self.subTest(candidate=candidate):
                 report = select_template(
                     user_template=candidate,
@@ -288,6 +320,20 @@ class PaperProductionTests(unittest.TestCase):
         )
         self.assertEqual("fallback_non_submission", fallback["template_status"])
         self.assertEqual(str(self.fallback), fallback["source"])
+
+        copied_fallback = self.root / "official-fallback-copy"
+        shutil.copytree(self.fallback, copied_fallback)
+        self.write_verified_metadata(self.local_official)
+        local_after_fallback_official = select_template(
+            None,
+            self.fallback,
+            copied_fallback,
+            locally_verified_template=self.local_official,
+        )
+        self.assertEqual(
+            "locally_verified_official",
+            local_after_fallback_official["selection_tier"],
+        )
 
     def test_unverified_official_cannot_claim_verified_official_status(self) -> None:
         report = select_template(
@@ -483,9 +529,23 @@ class PaperProductionTests(unittest.TestCase):
         )
         body_path = project / "iterations/v001/paper/template/paper-body.tex"
         body = body_path.read_text(encoding="utf-8")
-        self.assertLess(body.index("\\label{mm-body-start}"), body.index("\\section{问题背景与重述}"))
+        self.assertGreater(body.index("\\label{mm-body-start}"), body.index("\\section{问题背景与重述}"))
         self.assertGreater(body.index("\\label{mm-body-end}"), body.index("汇总冻结证据支持的结论。"))
         self.assertEqual("pass", report["status"])
+
+    def test_body_start_marker_follows_a_section_one_page_transition(self) -> None:
+        project, content = self.make_project()
+        compiler = self.make_compiler(section_one_starts_new_page=True)
+        environment = self.environment_manifest(project, compiler)
+        report = produce_paper(
+            project,
+            "v001",
+            content,
+            environment,
+            template_path=None,
+            compiler=compiler,
+        )
+        self.assertEqual(2, report["page_qa"]["body_range"]["start"])
 
     def test_authorized_english_abstract_is_preserved_in_generated_frontmatter(self) -> None:
         project, content = self.make_project(english=True)
@@ -516,6 +576,7 @@ class PaperProductionTests(unittest.TestCase):
         mutate_template: bool = False,
         aux_tokens: list[str] | None = None,
         build_logs: list[str] | None = None,
+        section_one_starts_new_page: bool = False,
     ) -> Path:
         compiler = self.root / f"compiler-{exit_code}-{int(write_pdf)}"
         fixture_pdf = compiler.with_suffix(".pdf")
@@ -547,7 +608,12 @@ class PaperProductionTests(unittest.TestCase):
             f"    symlink_pdf = {symlink_pdf!r}\n"
             "    (target / 'main.pdf').symlink_to(source) if symlink_pdf else shutil.copyfile(source, target / 'main.pdf')\n"
             f"    aux_tokens = {aux_tokens!r}\n"
-            "    if aux_tokens is None: shutil.copyfile(pathlib.Path(__file__).with_suffix('.aux'), target / 'main.aux')\n"
+            f"    section_one_starts_new_page = {section_one_starts_new_page!r}\n"
+            "    if section_one_starts_new_page:\n"
+            "        body = (pathlib.Path.cwd() / 'paper-body.tex').read_text()\n"
+            "        start_page = 2 if body.index('\\\\section{') < body.index('mm-body-start') else 1\n"
+            "        (target / 'main.aux').write_text('\\\\newlabel{mm-body-start}{{1}{' + str(start_page) + '}}\\n\\\\newlabel{mm-body-end}{{8}{26}}\\n')\n"
+            "    elif aux_tokens is None: shutil.copyfile(pathlib.Path(__file__).with_suffix('.aux'), target / 'main.aux')\n"
             "    else:\n"
             "        token = aux_tokens[min(pass_number - 1, len(aux_tokens) - 1)]\n"
             "        (target / 'main.aux').write_text('\\\\newlabel{mm-body-start}{{1}{1}}\\n\\\\newlabel{mm-body-end}{{8}{26}}\\n% ' + token + '\\n')\n"
@@ -672,9 +738,13 @@ class PaperProductionTests(unittest.TestCase):
         real_mkdir = os.mkdir
 
         def racing_mkdir(path: object, *args: object, **kwargs: object) -> None:
-            candidate = Path(path)
-            if candidate == destination / "nested" and not candidate.exists():
-                candidate.symlink_to(outside, target_is_directory=True)
+            if path == "nested" and kwargs.get("dir_fd") is not None:
+                os.symlink(
+                    outside,
+                    "nested",
+                    target_is_directory=True,
+                    dir_fd=kwargs["dir_fd"],
+                )
                 return
             real_mkdir(path, *args, **kwargs)
 
@@ -682,6 +752,29 @@ class PaperProductionTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 _copy_selected_template(selection, destination)
         self.assertEqual("preserve me\n", escaped.read_text(encoding="utf-8"))
+
+    def test_intermediate_parent_replacement_cannot_redirect_leaf_publication(self) -> None:
+        destination_root = self.root / "publication-root"
+        destination_parent = destination_root / "nested"
+        outside = self.root / "outside-publication"
+        displaced = self.root / "displaced-parent"
+        destination_parent.mkdir(parents=True)
+        outside.mkdir()
+        target = destination_parent / "artifact.bin"
+        real_open = os.open
+
+        def racing_open(path: object, flags: int, *args: object, **kwargs: object) -> int:
+            if Path(path) == target and not destination_parent.is_symlink():
+                destination_parent.rename(displaced)
+                destination_parent.symlink_to(outside, target_is_directory=True)
+            return real_open(path, flags, *args, **kwargs)
+
+        with patch("paper_production.os.open", side_effect=racing_open):
+            try:
+                _write_new_bytes(target, b"audited payload", "race probe")
+            except (OSError, ValueError):
+                pass
+        self.assertFalse((outside / "artifact.bin").exists())
 
     def test_final_pdf_collision_is_preserved_without_replacement(self) -> None:
         project, content = self.make_project()
@@ -1001,7 +1094,9 @@ class PaperProductionTests(unittest.TestCase):
             )
         self.assertFalse((project / "iterations/v001/paper/template").exists())
 
-    def test_verified_visual_review_is_required_for_submission_ready(self) -> None:
+    def prepare_visual_finalization(
+        self,
+    ) -> tuple[Path, Path, Path, Path, Path, dict[str, object]]:
         project, content = self.make_project()
         compiler = self.make_compiler()
         environment = self.environment_manifest(project, compiler)
@@ -1010,25 +1105,6 @@ class PaperProductionTests(unittest.TestCase):
             "\\input{paper-frontmatter.tex}\\input{paper-body.tex}"
             "\\input{paper-appendices.tex}\\end{document}"
         )
-        render = project / "qa/paper-render.png"
-        render.write_bytes(b"reviewed rendered pages")
-        review = project / "qa/paper-visual-review.json"
-        review.write_text(
-            json.dumps(
-                {
-                    "status": "verified",
-                    "pdf_sha256": sha256_file(compiler.with_suffix(".pdf")),
-                    "page_coverage": {"start": 1, "end": 26, "pages": 26},
-                    "render_evidence": [
-                        {"path": str(render), "sha256": sha256_file(render)}
-                    ],
-                    "reviewer": "fixture-reviewer",
-                },
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
         report = produce_paper(
             project,
             "v001",
@@ -1036,13 +1112,179 @@ class PaperProductionTests(unittest.TestCase):
             environment,
             template_path=template,
             compiler=compiler,
-            visual_review_path=review,
         )
-        self.assertEqual("pass", report["page_qa"]["visual_qa"]["status"])
+        paper = project / "iterations/v001/paper"
+        request = paper / "visual_review_request.json"
+        render_dir = project / "qa" / f"render-{project.name}"
+        render_dir.mkdir()
+        pages: list[dict[str, object]] = []
+        for page_number in range(1, 27):
+            image = render_dir / f"page-{page_number:03d}.png"
+            write_render_png(image)
+            pages.append(
+                {
+                    "page": page_number,
+                    "path": image.relative_to(project).as_posix(),
+                    "sha256": sha256_file(image),
+                    "width_px": 3,
+                    "height_px": 2,
+                }
+            )
+        render_manifest = project / "qa" / f"paper-render-{project.name}.json"
+        render_payload = {
+            "schema_version": "1",
+            "manifest_type": "paper_render",
+            "iteration": "v001",
+            "pdf_path": report["pdf"]["path"],
+            "pdf_sha256": report["pdf"]["sha256"],
+            "review_request_path": request.relative_to(project).as_posix(),
+            "review_request_sha256": sha256_file(request),
+            "total_pages": 26,
+            "renderer": {
+                "name": "fixture-renderer",
+                "version": "1.0",
+                "method": "one PNG per compiled PDF page",
+                "command": ["fixture-renderer", "--all-pages", report["pdf"]["path"]],
+            },
+            "pages": pages,
+        }
+        render_manifest.write_text(
+            json.dumps(render_payload, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        review = project / "qa/paper-visual-review.json"
+        review_payload = {
+            "schema_version": "1",
+            "manifest_type": "paper_visual_review",
+            "iteration": "v001",
+            "status": "pass",
+            "pdf_sha256": report["pdf"]["sha256"],
+            "render_manifest_path": render_manifest.relative_to(project).as_posix(),
+            "render_manifest_sha256": sha256_file(render_manifest),
+            "page_coverage": {"start": 1, "end": 26, "pages": 26},
+            "checklist": {
+                "blank_pages": "pass",
+                "cropping": "pass",
+                "garbled_text": "pass",
+                "overlap": "pass",
+                "abnormal_font_or_hidden_padding": "pass",
+            },
+            "reviewer": "fixture-reviewer",
+            "reviewed_at": "2026-08-28T12:00:00Z",
+        }
+        review.write_text(
+            json.dumps(review_payload, sort_keys=True) + "\n", encoding="utf-8"
+        )
+        return project, compiler, request, render_manifest, review, report
+
+    def test_compile_render_review_finalize_is_immutable_and_does_not_recompile(self) -> None:
+        project, compiler, request, render_manifest, review, candidate = (
+            self.prepare_visual_finalization()
+        )
+        paper = project / "iterations/v001/paper"
+        manifest = paper / "paper_manifest.json"
+        before = {
+            "manifest": sha256_file(manifest),
+            "pdf": sha256_file(paper / "paper.pdf"),
+            "passes": (paper / "build/attempt-01/.fixture-pass-count").read_text(),
+        }
+        self.assertFalse(candidate["submission_ready"])
         self.assertEqual(
-            sha256_file(review), report["page_qa"]["visual_qa"]["review_sha256"]
+            "iterations/v001/paper/paper_finalization.json",
+            candidate["readiness"]["authority"],
         )
-        self.assertTrue(report["submission_ready"])
+        self.assertTrue(request.is_file())
+
+        final = paper_production.finalize_paper(project, "v001", review)
+
+        self.assertTrue(final["submission_ready"])
+        self.assertTrue(final["readiness_authority"])
+        self.assertEqual(sha256_file(render_manifest), final["render_manifest"]["sha256"])
+        self.assertEqual(before["manifest"], sha256_file(manifest))
+        self.assertEqual(before["pdf"], sha256_file(paper / "paper.pdf"))
+        self.assertEqual(
+            before["passes"],
+            (paper / "build/attempt-01/.fixture-pass-count").read_text(),
+        )
+        with self.assertRaises(FileExistsError):
+            paper_production.finalize_paper(project, "v001", review)
+
+    def test_finalization_rejects_stale_or_incomplete_visual_evidence(self) -> None:
+        cases = (
+            "wrong_pdf",
+            "missing_page",
+            "duplicate_page",
+            "arbitrary_bytes",
+            "blank_png",
+            "tampered_pdf",
+            "tampered_request",
+            "unknown_check",
+            "stale_project",
+        )
+        for case in cases:
+            with self.subTest(case=case):
+                project, _, request, render_manifest, review, _ = (
+                    self.prepare_visual_finalization()
+                )
+                render_payload = json.loads(render_manifest.read_text(encoding="utf-8"))
+                review_payload = json.loads(review.read_text(encoding="utf-8"))
+                if case == "wrong_pdf":
+                    render_payload["pdf_sha256"] = "0" * 64
+                elif case == "missing_page":
+                    render_payload["pages"].pop()
+                elif case == "duplicate_page":
+                    render_payload["pages"][-1]["page"] = 1
+                elif case in ("arbitrary_bytes", "blank_png"):
+                    first = project / render_payload["pages"][0]["path"]
+                    if case == "arbitrary_bytes":
+                        first.write_bytes(b"not a rendered PNG")
+                    else:
+                        write_render_png(first, blank=True)
+                    render_payload["pages"][0]["sha256"] = sha256_file(first)
+                elif case == "tampered_pdf":
+                    (project / "iterations/v001/paper/paper.pdf").write_bytes(
+                        b"tampered candidate"
+                    )
+                elif case == "tampered_request":
+                    request.write_text(request.read_text(encoding="utf-8") + " ")
+                elif case == "unknown_check":
+                    review_payload["checklist"]["cropping"] = "unknown"
+                elif case == "stale_project":
+                    current_path = project / "current.json"
+                    current = json.loads(current_path.read_text(encoding="utf-8"))
+                    current["status"] = "stale"
+                    current_path.write_text(json.dumps(current, sort_keys=True) + "\n")
+
+                if case in {
+                    "wrong_pdf",
+                    "missing_page",
+                    "duplicate_page",
+                    "arbitrary_bytes",
+                    "blank_png",
+                }:
+                    render_manifest.write_text(
+                        json.dumps(render_payload, sort_keys=True) + "\n", encoding="utf-8"
+                    )
+                    review_payload["render_manifest_sha256"] = sha256_file(render_manifest)
+                if case == "unknown_check":
+                    review.write_text(
+                        json.dumps(review_payload, sort_keys=True) + "\n", encoding="utf-8"
+                    )
+                elif case in {
+                    "wrong_pdf",
+                    "missing_page",
+                    "duplicate_page",
+                    "arbitrary_bytes",
+                    "blank_png",
+                }:
+                    review.write_text(
+                        json.dumps(review_payload, sort_keys=True) + "\n", encoding="utf-8"
+                    )
+
+                with self.assertRaises(ValueError):
+                    paper_production.finalize_paper(project, "v001", review)
+                self.assertFalse(
+                    (project / "iterations/v001/paper/paper_finalization.json").exists()
+                )
 
     def test_existing_iteration_paper_output_is_never_overwritten(self) -> None:
         project, content = self.make_project()
