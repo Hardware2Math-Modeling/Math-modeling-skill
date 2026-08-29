@@ -1457,6 +1457,27 @@ class PaperProductionTests(unittest.TestCase):
             sorted(path.name for path in (paper / "render-attempts").iterdir()),
         )
 
+    def test_render_manifest_recovery_rejects_coherent_page_and_attempt_mutation(self) -> None:
+        project, renderer, render_manifest, attempt, _ = (
+            self.prepare_unpublished_render_success()
+        )
+        attempt_path = attempt / "attempt.json"
+        record = json.loads(attempt_path.read_text(encoding="utf-8"))
+        first_page = project / record["pages"][0]["path"]
+        write_render_png(first_page, width=4)
+        record["pages"][0]["sha256"] = sha256_file(first_page)
+        record["pages"][0]["width_px"] = 4
+        attempt_path.write_text(
+            json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
+            + "\n",
+            encoding="utf-8",
+        )
+        with self.assertRaises(ValueError):
+            render_paper_pages(project, "v001", renderer=renderer)
+        self.assertFalse(render_manifest.exists())
+        self.assertEqual("1", (renderer.parent / "render-count.txt").read_text(encoding="utf-8"))
+        self.assertEqual("1", (renderer.parent / "version-count.txt").read_text(encoding="utf-8"))
+
     def test_render_manifest_recovery_rejects_tampered_success_state(self) -> None:
         cases = (
             "attempt_hash",

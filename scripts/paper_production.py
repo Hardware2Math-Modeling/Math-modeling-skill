@@ -2036,11 +2036,10 @@ def _bound_render_attempt_command(
     executable: Path,
     pdf: Path,
 ) -> list[str]:
-    if set(path.name for path in attempt.iterdir()) != {
-        "pages",
-        "render.log",
-        "attempt.json",
-    }:
+    expected_entries = {"pages", "render.log", "attempt.json"}
+    if record.get("status") == "pass":
+        expected_entries.add("render-commitment.json")
+    if set(path.name for path in attempt.iterdir()) != expected_entries:
         raise ValueError("render attempt contains unexpected top-level entries")
     candidate_record = _exact_keys(
         record.get("candidate"),
@@ -2236,7 +2235,113 @@ def _recover_render_manifest(
         "total_pages": total_pages,
         "pages": normalized_pages,
     }
-    _write_new_json(render_manifest_path, payload)
+    commitment_path = attempt / "render-commitment.json"
+    commitment = _strict_json(commitment_path, "render recovery commitment")
+    commitment_bytes = commitment_path.read_bytes()
+    if commitment_bytes != _canonical_json_bytes(commitment):
+        raise ValueError("render recovery commitment is not canonical")
+    _exact_keys(
+        commitment,
+        {
+            "schema_version",
+            "manifest_type",
+            "iteration",
+            "attempt",
+            "log",
+            "pages",
+            "manifest",
+            "candidate",
+            "environment",
+            "renderer",
+        },
+        "render recovery commitment",
+    )
+    if (
+        commitment.get("schema_version") != "1"
+        or commitment.get("manifest_type") != "paper_render_commitment"
+        or commitment.get("iteration") != iteration
+    ):
+        raise ValueError("render recovery commitment identity is invalid")
+
+    committed_attempt = _exact_keys(
+        commitment.get("attempt"),
+        {"id", "path", "record_path", "record_sha256", "byte_size"},
+        "render recovery commitment attempt",
+    )
+    if (
+        committed_attempt.get("id") != record.get("attempt_id")
+        or committed_attempt.get("path") != attempt.relative_to(project).as_posix()
+        or committed_attempt.get("record_path") != attempt_path.relative_to(project).as_posix()
+        or committed_attempt.get("record_sha256") != sha256_file(attempt_path)
+        or committed_attempt.get("byte_size") != attempt_path.stat(follow_symlinks=False).st_size
+    ):
+        raise ValueError("render recovery commitment attempt binding is stale or tampered")
+
+    committed_log = _exact_keys(
+        commitment.get("log"),
+        {"path", "sha256", "byte_size"},
+        "render recovery commitment log",
+    )
+    if (
+        committed_log.get("path") != log_path.relative_to(project).as_posix()
+        or committed_log.get("sha256") != log_hash
+        or committed_log.get("byte_size") != log_path.stat(follow_symlinks=False).st_size
+    ):
+        raise ValueError("render recovery commitment log binding is stale or tampered")
+
+    committed_candidate = _exact_keys(
+        commitment.get("candidate"),
+        {
+            "manifest_path",
+            "manifest_sha256",
+            "request_path",
+            "request_sha256",
+            "pdf_path",
+            "pdf_sha256",
+        },
+        "render recovery commitment candidate",
+    )
+    expected_candidate_chain = {
+        "manifest_path": manifest_path.relative_to(project).as_posix(),
+        "manifest_sha256": immutable_hashes["manifest"],
+        "request_path": request_path.relative_to(project).as_posix(),
+        "request_sha256": immutable_hashes["request"],
+        "pdf_path": pdf_record["path"],
+        "pdf_sha256": immutable_hashes["pdf"],
+    }
+    if committed_candidate != expected_candidate_chain:
+        raise ValueError("render recovery commitment candidate binding is stale or tampered")
+    if commitment.get("environment") != expected_environment:
+        raise ValueError("render recovery commitment environment binding is stale or tampered")
+    if commitment.get("renderer") != renderer_evidence:
+        raise ValueError("render recovery commitment renderer binding is stale or tampered")
+
+    committed_pages = commitment.get("pages")
+    expected_committed_pages = [
+        dict(
+            page,
+            byte_size=_project_evidence_file(
+                project, page["path"], "rendered page PNG"
+            ).stat(follow_symlinks=False).st_size,
+        )
+        for page in normalized_pages
+    ]
+    if committed_pages != expected_committed_pages:
+        raise ValueError("render recovery commitment page inventory is stale or tampered")
+    committed_manifest = _exact_keys(
+        commitment.get("manifest"),
+        {"path", "sha256", "byte_size", "payload"},
+        "render recovery commitment manifest",
+    )
+    canonical_manifest_bytes = _canonical_json_bytes(payload)
+    if (
+        committed_manifest.get("path") != render_manifest_path.relative_to(project).as_posix()
+        or committed_manifest.get("payload") != payload
+        or committed_manifest.get("sha256") != hashlib.sha256(canonical_manifest_bytes).hexdigest()
+        or committed_manifest.get("byte_size") != len(canonical_manifest_bytes)
+    ):
+        raise ValueError("render recovery commitment manifest binding is stale or tampered")
+    _write_new_bytes(render_manifest_path, canonical_manifest_bytes, "render manifest")
     return payload
 
 
@@ -2461,6 +2566,53 @@ def render_paper_pages(
         "total_pages": page_qa["total_pages"],
         "pages": attempt_record["pages"],
     }
+    manifest_bytes = _canonical_json_bytes(payload)
+    commitment = {
+        "schema_version": "1",
+        "manifest_type": "paper_render_commitment",
+        "iteration": iteration,
+        "attempt": {
+            "id": attempt_id,
+            "path": attempt.relative_to(project).as_posix(),
+            "record_path": attempt_path.relative_to(project).as_posix(),
+            "record_sha256": sha256_file(attempt_path),
+            "byte_size": attempt_path.stat(follow_symlinks=False).st_size,
+        },
+        "log": {
+            "path": log_path.relative_to(project).as_posix(),
+            "sha256": sha256_file(log_path),
+            "byte_size": log_path.stat(follow_symlinks=False).st_size,
+        },
+        "pages": [
+            dict(
+                page,
+                byte_size=_project_evidence_file(
+                    project, page["path"], "rendered page PNG"
+                ).stat(follow_symlinks=False).st_size,
+            )
+            for page in attempt_record["pages"]
+        ],
+        "manifest": {
+            "path": render_manifest_path.relative_to(project).as_posix(),
+            "sha256": hashlib.sha256(manifest_bytes).hexdigest(),
+            "byte_size": len(manifest_bytes),
+            "payload": payload,
+        },
+        "candidate": {
+            "manifest_path": manifest_path.relative_to(project).as_posix(),
+            "manifest_sha256": before["manifest"],
+            "request_path": request_path.relative_to(project).as_posix(),
+            "request_sha256": before["request"],
+            "pdf_path": pdf_record["path"],
+            "pdf_sha256": before["pdf"],
+        },
+        "environment": {
+            "path": environment_path.relative_to(project).as_posix(),
+            "sha256": environment_hash,
+        },
+        "renderer": renderer_evidence,
+    }
+    _write_new_json(attempt / "render-commitment.json", commitment)
     _write_new_json(render_manifest_path, payload)
     return payload
 
