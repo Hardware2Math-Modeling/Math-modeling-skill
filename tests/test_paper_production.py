@@ -1478,6 +1478,69 @@ class PaperProductionTests(unittest.TestCase):
         self.assertEqual("1", (renderer.parent / "render-count.txt").read_text(encoding="utf-8"))
         self.assertEqual("1", (renderer.parent / "version-count.txt").read_text(encoding="utf-8"))
 
+    def test_render_manifest_recovery_rejects_self_authenticating_commitment_replacement(self) -> None:
+        project, renderer, render_manifest, attempt, _ = (
+            self.prepare_unpublished_render_success()
+        )
+        attempt_path = attempt / "attempt.json"
+        record = json.loads(attempt_path.read_text(encoding="utf-8"))
+        first_page = project / record["pages"][0]["path"]
+        write_render_png(first_page, width=4)
+        record["pages"][0].update(
+            {"sha256": sha256_file(first_page), "width_px": 4}
+        )
+        attempt_path.write_text(
+            json.dumps(record, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False)
+            + "\n",
+            encoding="utf-8",
+        )
+
+        commitment_path = attempt / "render-commitment.json"
+        commitment = json.loads(commitment_path.read_text(encoding="utf-8"))
+        commitment["attempt"]["record_sha256"] = sha256_file(attempt_path)
+        commitment["attempt"]["byte_size"] = attempt_path.stat().st_size
+        commitment["pages"][0].update(
+            {
+                "sha256": sha256_file(first_page),
+                "width_px": 4,
+                "byte_size": first_page.stat().st_size,
+            }
+        )
+        manifest_payload = commitment["manifest"]["payload"]
+        manifest_payload["attempt"]["record_sha256"] = sha256_file(attempt_path)
+        manifest_payload["pages"][0].update(
+            {"sha256": sha256_file(first_page), "width_px": 4}
+        )
+        manifest_bytes = (
+            json.dumps(
+                manifest_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+        commitment["manifest"]["sha256"] = hashlib.sha256(manifest_bytes).hexdigest()
+        commitment["manifest"]["byte_size"] = len(manifest_bytes)
+        commitment_path.write_text(
+            json.dumps(
+                commitment,
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+                allow_nan=False,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+
+        with self.assertRaises(ValueError):
+            render_paper_pages(project, "v001", renderer=renderer)
+        self.assertFalse(render_manifest.exists())
+        self.assertEqual("1", (renderer.parent / "render-count.txt").read_text(encoding="utf-8"))
+        self.assertEqual("1", (renderer.parent / "version-count.txt").read_text(encoding="utf-8"))
+
     def test_render_manifest_recovery_rejects_tampered_success_state(self) -> None:
         cases = (
             "attempt_hash",

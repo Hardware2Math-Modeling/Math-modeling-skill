@@ -37,6 +37,8 @@ _POPPLER_VERSION_RE = re.compile(
     r"^pdftoppm version [0-9]+(?:\.[0-9]+){1,3}(?:[-+._A-Za-z0-9]*)?$"
 )
 _RENDERER_TRUST_BASIS = "user_supplied_preflight_binary"
+_RENDER_COMMITMENT_KEY = "render-commitment-signing-key.json"
+_LAMPORT_ALGORITHM = "lamport-sha256-v1"
 _UPSTREAM_STAGES = {
     "problem-analysis",
     "model-construction",
@@ -121,6 +123,65 @@ def _canonical_json_bytes(payload: object) -> bytes:
 
 def _write_new_json(path: Path, payload: object) -> None:
     _write_new_bytes(path, _canonical_json_bytes(payload), "paper manifest")
+
+
+def _new_render_commitment_authority() -> tuple[dict[str, object], dict[str, object]]:
+    private_pairs = [
+        [secrets.token_bytes(32), secrets.token_bytes(32)] for _ in range(256)
+    ]
+    public_key = [
+        [hashlib.sha256(value).hexdigest() for value in pair]
+        for pair in private_pairs
+    ]
+    key_id = hashlib.sha256(_canonical_json_bytes(public_key)).hexdigest()
+    authority = {
+        "algorithm": _LAMPORT_ALGORITHM,
+        "key_id": key_id,
+        "public_key": public_key,
+    }
+    private = {
+        "schema_version": "1",
+        "manifest_type": "paper_render_commitment_private_key",
+        "algorithm": _LAMPORT_ALGORITHM,
+        "key_id": key_id,
+        "private_key": [
+            [base64.b64encode(value).decode("ascii") for value in pair]
+            for pair in private_pairs
+        ],
+    }
+    return authority, private
+
+
+def _render_commitment_authority(value: object) -> dict[str, object]:
+    authority = _exact_keys(
+        value,
+        {"algorithm", "key_id", "public_key"},
+        "render commitment authority",
+    )
+    public_key = authority.get("public_key")
+    if (
+        authority.get("algorithm") != _LAMPORT_ALGORITHM
+        or type(public_key) is not list
+        or len(public_key) != 256
+    ):
+        raise ValueError("render commitment authority is invalid")
+    for pair in public_key:
+        if (
+            type(pair) is not list
+            or len(pair) != 2
+            or any(
+                type(value) is not str or _HASH_RE.fullmatch(value) is None
+                for value in pair
+            )
+        ):
+            raise ValueError("render commitment authority public key is invalid")
+    key_id = authority.get("key_id")
+    if (
+        type(key_id) is not str
+        or key_id != hashlib.sha256(_canonical_json_bytes(public_key)).hexdigest()
+    ):
+        raise ValueError("render commitment authority key id is invalid")
+    return authority
 
 
 def _open_directory_fd(path: Path, label: str) -> int:
@@ -412,6 +473,7 @@ def _preflight_output_paths(paper: Path) -> None:
         "paper.pdf",
         "visual_review_request.json",
         "paper_finalization.json",
+        _RENDER_COMMITMENT_KEY,
     ):
         target = paper / relative
         if target.exists() or target.is_symlink():
@@ -1019,6 +1081,102 @@ def _exact_keys(value: object, required: set[str], label: str) -> dict[str, obje
     if type(value) is not dict or set(value) != required:
         raise ValueError(f"{label} fields are not exact")
     return value
+
+
+def _load_render_commitment_private_key(
+    path: Path, authority: dict[str, object]
+) -> list[list[bytes]]:
+    record = _strict_json(path, "render commitment private key")
+    if path.read_bytes() != _canonical_json_bytes(record):
+        raise ValueError("render commitment private key is not canonical")
+    _exact_keys(
+        record,
+        {"schema_version", "manifest_type", "algorithm", "key_id", "private_key"},
+        "render commitment private key",
+    )
+    private_key = record.get("private_key")
+    if (
+        record.get("schema_version") != "1"
+        or record.get("manifest_type") != "paper_render_commitment_private_key"
+        or record.get("algorithm") != _LAMPORT_ALGORITHM
+        or record.get("key_id") != authority.get("key_id")
+        or type(private_key) is not list
+        or len(private_key) != 256
+    ):
+        raise ValueError("render commitment private key identity is invalid")
+    decoded: list[list[bytes]] = []
+    public_key = authority["public_key"]
+    assert type(public_key) is list
+    for index, pair in enumerate(private_key):
+        if type(pair) is not list or len(pair) != 2:
+            raise ValueError("render commitment private key shape is invalid")
+        decoded_pair: list[bytes] = []
+        for bit, encoded in enumerate(pair):
+            if type(encoded) is not str:
+                raise ValueError("render commitment private key value is invalid")
+            try:
+                raw = base64.b64decode(encoded, validate=True)
+            except (ValueError, binascii.Error) as error:
+                raise ValueError("render commitment private key value is invalid") from error
+            if (
+                len(raw) != 32
+                or hashlib.sha256(raw).hexdigest() != public_key[index][bit]
+            ):
+                raise ValueError("render commitment private key does not match authority")
+            decoded_pair.append(raw)
+        decoded.append(decoded_pair)
+    return decoded
+
+
+def _sign_render_commitment(
+    payload: dict[str, object], private_key: list[list[bytes]], key_id: str
+) -> dict[str, object]:
+    digest = hashlib.sha256(_canonical_json_bytes(payload)).digest()
+    values = []
+    for index in range(256):
+        bit = (digest[index // 8] >> (7 - index % 8)) & 1
+        values.append(base64.b64encode(private_key[index][bit]).decode("ascii"))
+    return {
+        "algorithm": _LAMPORT_ALGORITHM,
+        "key_id": key_id,
+        "signed_sha256": digest.hex(),
+        "values": values,
+    }
+
+
+def _verify_render_commitment_signature(
+    payload: dict[str, object], signature_value: object, authority: dict[str, object]
+) -> None:
+    signature = _exact_keys(
+        signature_value,
+        {"algorithm", "key_id", "signed_sha256", "values"},
+        "render commitment signature",
+    )
+    digest = hashlib.sha256(_canonical_json_bytes(payload)).digest()
+    values = signature.get("values")
+    if (
+        signature.get("algorithm") != _LAMPORT_ALGORITHM
+        or signature.get("key_id") != authority.get("key_id")
+        or signature.get("signed_sha256") != digest.hex()
+        or type(values) is not list
+        or len(values) != 256
+    ):
+        raise ValueError("render commitment signature identity is invalid")
+    public_key = authority["public_key"]
+    assert type(public_key) is list
+    for index, encoded in enumerate(values):
+        if type(encoded) is not str:
+            raise ValueError("render commitment signature value is invalid")
+        try:
+            raw = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error) as error:
+            raise ValueError("render commitment signature value is invalid") from error
+        bit = (digest[index // 8] >> (7 - index % 8)) & 1
+        if (
+            len(raw) != 32
+            or hashlib.sha256(raw).hexdigest() != public_key[index][bit]
+        ):
+            raise ValueError("render commitment signature does not match authority")
 
 
 def _utc_timestamp(value: object, label: str) -> str:
@@ -2236,6 +2394,9 @@ def _recover_render_manifest(
         "pages": normalized_pages,
     }
     commitment_path = attempt / "render-commitment.json"
+    signing_key_path = paper / _RENDER_COMMITMENT_KEY
+    if signing_key_path.exists() or signing_key_path.is_symlink():
+        raise ValueError("render recovery private signing key was not consumed")
     commitment = _strict_json(commitment_path, "render recovery commitment")
     commitment_bytes = commitment_path.read_bytes()
     if commitment_bytes != _canonical_json_bytes(commitment):
@@ -2253,9 +2414,16 @@ def _recover_render_manifest(
             "candidate",
             "environment",
             "renderer",
+            "signature",
         },
         "render recovery commitment",
     )
+    authority = _render_commitment_authority(
+        candidate.get("render_commitment_authority")
+    )
+    unsigned_commitment = dict(commitment)
+    signature = unsigned_commitment.pop("signature")
+    _verify_render_commitment_signature(unsigned_commitment, signature, authority)
     if (
         commitment.get("schema_version") != "1"
         or commitment.get("manifest_type") != "paper_render_commitment"
@@ -2392,6 +2560,11 @@ def render_paper_pages(
     )
     if recovered is not None:
         return recovered
+    authority = _render_commitment_authority(
+        candidate.get("render_commitment_authority")
+    )
+    signing_key_path = paper / _RENDER_COMMITMENT_KEY
+    private_key = _load_render_commitment_private_key(signing_key_path, authority)
     attempt_id, attempt = _new_render_attempt(project, paper, iteration)
     pages_dir = attempt / "pages"
     _mkdir_new(pages_dir, "render attempt pages directory")
@@ -2612,7 +2785,13 @@ def render_paper_pages(
         },
         "renderer": renderer_evidence,
     }
+    key_id = authority.get("key_id")
+    assert type(key_id) is str
+    commitment["signature"] = _sign_render_commitment(
+        commitment, private_key, key_id
+    )
     _write_new_json(attempt / "render-commitment.json", commitment)
+    _regular_file(signing_key_path, "render commitment private key").unlink()
     _write_new_json(render_manifest_path, payload)
     return payload
 
@@ -2657,9 +2836,11 @@ def _validate_candidate_for_finalization(
             "pdf",
             "page_qa",
             "readiness",
+            "render_commitment_authority",
         },
         "candidate manifest",
     )
+    _render_commitment_authority(manifest.get("render_commitment_authority"))
     if (
         manifest.get("schema_version") != "1"
         or manifest.get("manifest_type") != "paper"
@@ -3150,9 +3331,11 @@ def recover_paper_publication(project_root: Path, iteration: str) -> dict[str, o
             "pdf",
             "page_qa",
             "readiness",
+            "render_commitment_authority",
         },
         "receipt candidate manifest",
     )
+    _render_commitment_authority(manifest.get("render_commitment_authority"))
     status = manifest.get("status")
     page_qa = manifest.get("page_qa")
     if (
@@ -3421,6 +3604,7 @@ def produce_paper(
         }
 
     status = str(page_qa["status"])
+    render_authority, render_private_key = _new_render_commitment_authority()
     review_request_path = paper / "visual_review_request.json"
     finalization_path = paper / "paper_finalization.json"
     report = {
@@ -3435,6 +3619,7 @@ def produce_paper(
             "authority": _project_relative(project, finalization_path),
             "review_request": _project_relative(project, review_request_path),
         },
+        "render_commitment_authority": render_authority,
     }
     manifest_relative = _project_relative(project, manifest_path)
     manifest_bytes = _canonical_json_bytes(report)
@@ -3471,6 +3656,7 @@ def produce_paper(
     if manifest_bytes != expected_manifest_bytes:
         raise ValueError("candidate manifest canonical bytes changed during transaction setup")
     receipt_path = paper / "paper_publication_receipt.json"
+    _write_new_json(paper / _RENDER_COMMITMENT_KEY, render_private_key)
     _write_new_json(receipt_path, receipt)
     _write_new_json(manifest_path, report)
     _write_new_json(review_request_path, request)
