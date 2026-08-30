@@ -86,7 +86,7 @@ def _result(question: str, metric_path: str, metric_hash: str, run_id: str) -> d
     return {
         "question_id": question,
         "model_id": f"model-{suffix}-v1",
-        "assumptions": ["测试数据假设成立。"],
+        "assumptions": ["fixture/test-data：测试数据假设成立。"],
         "baseline": {"model_id": f"baseline-{suffix}", "metric": "score", "value": 0.5, "unit": "dimensionless"},
         "parameters": {"seed": {"value": 1729, "unit": "dimensionless"}},
         "metrics": {"score": {"value": 0.75, "unit": "dimensionless", "source_path": metric_path, "source_hash": metric_hash, "finite": True}},
@@ -183,6 +183,7 @@ class EndToEndFixtureTests(unittest.TestCase):
         compiler_exit: int = 0,
         validation: str = "pass",
         propagate_stale: bool = True,
+        create_mixed_iteration: bool = True,
     ) -> tuple[Path, Path]:
         self.assertEqual("pending", gate_status(self.project, "gate1"))
         self.assertTrue(cannot_route(self.project, "model-construction"))
@@ -204,7 +205,9 @@ class EndToEndFixtureTests(unittest.TestCase):
                 self.assertIn("unit", metric)
             metric = self.iteration / f"results/{q}-metric.json"; metric.write_text('{"score":0.75,"unit":"dimensionless"}\n')
             result = self.iteration / f"results/{q}-result.json"; result.write_text(json.dumps(_result(q.upper(), f"results/{q}-metric.json", sha256_file(metric), f"run-{q}-001"), sort_keys=True, ensure_ascii=False) + "\n")
-            self.assertEqual([], validate_result_payload(json.loads(result.read_text(encoding="utf-8"))))
+            result_payload = json.loads(result.read_text(encoding="utf-8"))
+            self.assertEqual([], validate_result_payload(result_payload))
+            self.assertIn("fixture/test-data", result_payload["assumptions"][0])
         figdir = self.iteration / "figures"; _png(figdir / "q1-fit.png")
         fm = self.iteration / "manifests/q1-fit.json"
         q1_output = self.iteration / "results/q1-run/output.json"
@@ -225,6 +228,8 @@ class EndToEndFixtureTests(unittest.TestCase):
         cap = _install_host_capability(verify_user_event=_Verifier(receipt).verify_user_event, verify_official_source=lambda **_:False, registration_token=_HOST_REGISTRATION_TOKEN)
         record_gate(self.project, gate_id="gate3", status="confirmed", confirmer="tester", artifact_hashes=[e["sha256"] for e in ordered], artifact_scope=scope, note="fixture review", confirmation_event_id="fixture-g3", host_capability=cap)
         content = {"schema_version":"1","language":"zh-CN","requirement_manifests":[],"abstract":{"intro_sentences":["测试问题。","本文完成验证。"],"question_paragraphs":[{"question_id":"Q1","leading_summary":"回归分析。","modeling_steps":"建立模型。","answer":"结果有效。"},{"question_id":"Q2","leading_summary":"资源分配。","modeling_steps":"建立约束。","answer":"成本最小。"}]},"keywords":["数学建模"],"sections":{"1":{"title":"问题背景与重述","subsections":{"1.1":{"title":"问题背景","content":"测试。"},"1.2":{"title":"问题重述","content":"测试。"}}},"2":{"title":"问题分析","content":"测试。"},"3":{"title":"模型假设","content":"测试。"},"4":{"title":"符号说明","content":"测试。"},"5":{"title":"模型的建立与求解","questions":[{"question_id":"Q1","title":"第一问","subsections":{"5.1.1":{"title":"建模","content":"测试。"},"5.1.2":{"title":"计算","content":"测试。"}}},{"question_id":"Q2","title":"第二问","subsections":{"5.2.1":{"title":"建模","content":"测试。"},"5.2.2":{"title":"计算","content":"测试。"}}}]},"6":{"title":"模型检验","content":"测试。"},"7":{"title":"模型评价与推广/改进","content":"测试。"},"8":{"title":"结论","content":"测试。"}},"symbols":[{"symbol":"x","description":"变量","unit":"无量纲"}],"claims":[{"question_id":"Q1","claim_id":"claim-q1-01","statement":"结果。","source_path":"results/q1-result.json","source_hash":sha256_file(self.iteration/'results/q1-result.json'),"important":True},{"question_id":"Q2","claim_id":"claim-q2-01","statement":"结果。","source_path":"results/q2-result.json","source_hash":sha256_file(self.iteration/'results/q2-result.json'),"important":True}],"figure_references":[],"table_references":[],"references":[],"code_appendix":[],"ai_use_disclosure":[],"human_review_records":[],"supplemental_appendix":[]}
+        content["keywords"].append("fixture/test-data")
+        self.assertIn("fixture/test-data", content["keywords"])
         content["claims"][0]["statement"] = "冻结结果的得分为 0.75。"
         content["claims"][1]["statement"] = "冻结结果的得分为 0.75。"
         self.assertEqual([], validate_paper_content(content, evidence_root=self.iteration))
@@ -241,10 +246,11 @@ class EndToEndFixtureTests(unittest.TestCase):
         self.assertEqual(["run", "figure", "validation", "paper"], stale["invalidated"]["Q2"])
         current = load_current(self.project)
         self.assertEqual("stale", current["status"])
-        create_iteration(self.project, reason="revise Q2", affected_questions=["Q2"])
-        current = load_current(self.project)
-        self.assertEqual("v001", current["question_sources"]["Q1"])
-        self.assertEqual("v002", current["question_sources"]["Q2"])
+        if create_mixed_iteration:
+            create_iteration(self.project, reason="revise Q2", affected_questions=["Q2"])
+            current = load_current(self.project)
+            self.assertEqual("v001", current["question_sources"]["Q1"])
+            self.assertEqual("v002", current["question_sources"]["Q2"])
         return compiler, env
 
     def test_offline_workflow_and_staleness(self) -> None:
@@ -274,6 +280,27 @@ class EndToEndFixtureTests(unittest.TestCase):
             reason="revise Q2",
             affected_questions=["Q2"],
         )
+        current = load_current(self.project)
+        self.assertEqual("v001", current["question_sources"]["Q1"])
+        self.assertEqual("v002", current["question_sources"]["Q2"])
+
+    def test_stale_propagation_mutates_input_and_invalidates_q2(self) -> None:
+        self._run_workflow(create_mixed_iteration=False)
+        self.assertIn(
+            "7,150,90,72,4.0,5.5",
+            (self.project / "input/data.csv").read_text(encoding="utf-8"),
+        )
+        stale = json.loads(
+            (self.project / "qa/staleness.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(
+            ["run", "figure", "validation", "paper"],
+            stale["invalidated"]["Q2"],
+        )
+        current = load_current(self.project)
+        self.assertEqual("stale", current["status"])
+        self.assertEqual("v001", current["question_sources"]["Q1"])
+        create_iteration(self.project, reason="revise Q2", affected_questions=["Q2"])
         current = load_current(self.project)
         self.assertEqual("v001", current["question_sources"]["Q1"])
         self.assertEqual("v002", current["question_sources"]["Q2"])
