@@ -1,7 +1,12 @@
 {
-  "schema_version": "1",
+  "schema_version": "2",
   "orchestrator": "math-modeling-orchestrator",
   "stages": [
+    {
+      "id": "preflight",
+      "skill": "math-modeling-preflight",
+      "optional": false
+    },
     {
       "id": "problem-analysis",
       "skill": "math-modeling-problem-analysis",
@@ -23,6 +28,11 @@
       "optional": false
     },
     {
+      "id": "visualization",
+      "skill": "math-modeling-visualization",
+      "optional": true
+    },
+    {
       "id": "validation",
       "skill": "math-modeling-validation",
       "optional": false
@@ -31,9 +41,17 @@
       "id": "paper-writing",
       "skill": "math-modeling-paper-writing",
       "optional": true
+    },
+    {
+      "id": "paper-production",
+      "skill": "math-modeling-paper-production",
+      "optional": true
     }
   ],
   "transitions": {
+    "preflight": [
+      "problem-analysis"
+    ],
     "problem-analysis": [
       "data-analysis",
       "model-construction"
@@ -45,6 +63,10 @@
       "model-solving"
     ],
     "model-solving": [
+      "visualization",
+      "validation"
+    ],
+    "visualization": [
       "validation"
     ],
     "validation-pass": [
@@ -58,6 +80,9 @@
       "model-solving"
     ],
     "paper-writing": [
+      "paper-production"
+    ],
+    "paper-production": [
       "complete"
     ]
   },
@@ -66,11 +91,29 @@
       "allowed": true,
       "requires_reason": true
     },
+    "visualization-skip": {
+      "allowed": true,
+      "requires_reason": true,
+      "requires_no_figure_claim": true
+    },
     "paper-writing": {
       "optional": true,
+      "requires_trusted_paper_request": true,
+      "requires_current_question_dependencies": true,
       "requires_validation_pass": true,
+      "requires_gate3": true,
       "requires_no_invalidated_inputs": true
+    },
+    "paper-production": {
+      "optional": true,
+      "requires_trusted_paper_request": true,
+      "requires_current_question_dependencies": true,
+      "requires_paper_writing": true
     }
+  },
+  "authorization_policy": {
+    "evaluator": "scripts/orchestrator_policy.py:authorization_errors",
+    "workflow_guards_exhaustive": false
   },
   "handoff": {
     "required_fields": [

@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "gate-confirmation.schema.json",
+  "title": "Externally verified user gate event receipt v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "provenance_type",
+    "provider",
+    "event_id",
+    "event_type",
+    "actor_id",
+    "occurred_at",
+    "challenge_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "2"},
+    "provenance_type": {"const": "trusted_user_event"},
+    "provider": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "event_id": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "event_type": {"const": "gate-confirmation"},
+    "actor_id": {"type": "string", "minLength": 1, "pattern": "\\S"},
+    "occurred_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$"
+    },
+    "challenge_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

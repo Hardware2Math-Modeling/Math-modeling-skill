@@ -1,0 +1,6 @@
+interface:
+  display_name: "Modeling Visualization"
+  short_description: "Create traceable modeling figures and QA"
+  default_prompt: "Use $math-modeling-visualization to prepare evidence-backed figures from these results."
+policy:
+  allow_implicit_invocation: true

@@ -1,0 +1,6 @@
+interface:
+  display_name: "Modeling Method Library"
+  short_description: "Retrieve maintained methods and templates safely"
+  default_prompt: "Use $math-modeling-method-library to retrieve and compare maintained methods for this modeling decision."
+policy:
+  allow_implicit_invocation: true

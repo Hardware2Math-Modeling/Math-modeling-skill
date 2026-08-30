@@ -2,114 +2,73 @@
 
 ## System boundary
 
-`math-modeling-suite` is one Codex plugin and one versioned distribution unit. The children under `skills/` are independent discovery and invocation units. Installing the plugin makes every skill available; it does not create an automatic program pipeline. `$math-modeling-orchestrator` owns stage selection, state transfer, skip decisions, revision control, and rollback decisions at model runtime.
+`math-modeling-suite` is one Codex plugin and one versioned distribution unit. Skills under `skills/` are independently discoverable, but the orchestrator is the only component that routes stages, evaluates gates, resumes state, creates immutable iterations, propagates stale evidence, and decides completion. The read-only method library is support material, not a routed stage.
 
-The initialization layer has no external runtime dependency. It provides contracts and deterministic tooling; future domain work adds mathematical methods behind the existing stage boundaries.
+## Routed stages
 
-## Component map
+`skills/math-modeling-orchestrator/references/workflow.json` is the machine-readable source of truth. Exactly these nine stages are routed in this order:
 
-| Skill | Owns | Must not own |
+| Stage | Skill | Optionality and boundary |
 | --- | --- | --- |
-| `math-modeling-orchestrator` | Cross-stage state, routing, gates, resume, revision, final synthesis | Detailed work of a stage |
-| `math-modeling-problem-analysis` | Objectives, constraints, metrics, variables, ambiguities | Final model selection or solving |
-| `math-modeling-data-analysis` | Provenance, units, quality, transformations, exploratory evidence | Final model selection or causal invention |
-| `math-modeling-model-construction` | Assumptions, notation, candidate models, equations, selection rationale | Full numerical execution |
-| `math-modeling-model-solving` | Algorithms, parameters, reproducibility, computed artifacts | Silent model changes or final validation |
-| `math-modeling-validation` | Fit, residuals, sensitivity, robustness, feasibility, limitations, rollback | Paper writing after a failed gate |
-| `math-modeling-paper-writing` | Traceable presentation of validated work | New evidence, hidden failures, or invented citations |
+| `preflight` | `math-modeling-preflight` | Required first; verifies the user-supplied absolute Python path, project, inputs, dependencies, LaTeX tools, and template. |
+| `problem-analysis` | `math-modeling-problem-analysis` | Required; records objectives, subproblems, variables, constraints, metrics, units, and assumptions. |
+| `data-analysis` | `math-modeling-data-analysis` | Conditionally required when data or external data is relevant; otherwise records a guarded skip reason. |
+| `model-construction` | `math-modeling-model-construction` | Required; proposes candidates, baseline, equations, assumptions, and validation plan for each question. |
+| `model-solving` | `math-modeling-model-solving` | Required; executes only the Gate 2 accepted model with the registered Python interpreter and persists reproducible evidence. |
+| `visualization` | `math-modeling-visualization` | Conditionally required for figure claims or figure-based checks; registers sources, roles, outputs, and figure QA before validation. |
+| `validation` | `math-modeling-validation` | Required; runs declared checks and rolls back to the earliest invalidated stage on failure. |
+| `paper-writing` | `math-modeling-paper-writing` | Required after a trusted paper request; writes only from current validated and frozen evidence. |
+| `paper-production` | `math-modeling-paper-production` | Required after paper writing; copies the template, compiles LaTeX, renders pages, performs QA, and finalizes only eligible templates. |
 
-## Routing source of truth
+`math-modeling-method-library` is a read-only support Skill. It exposes maintained method ids, references, deterministic templates, dependency metadata, validation guidance, and figure/paper notes. It has no workflow stage id, does not write project state, and never authorizes model selection or a downstream route.
 
-`skills/math-modeling-orchestrator/references/workflow.json` is the machine-readable stage registry. The suite validator enforces these normal completion transitions:
+Normal completion transitions are:
 
 ```text
+preflight -> problem-analysis
 problem-analysis -> data-analysis | model-construction
 data-analysis -> model-construction
 model-construction -> model-solving
-model-solving -> validation
+model-solving -> visualization | validation
+visualization -> validation
 validation-pass -> paper-writing | complete
 validation-fail -> problem-analysis | data-analysis | model-construction | model-solving
-paper-writing -> complete
+paper-writing -> paper-production
+paper-production -> complete
 ```
 
-Every new problem enters problem analysis first. Data analysis is optional and records a reason when skipped. Paper writing is optional and requires a current validation pass with no invalidated input stage. No route from failed validation may reach paper writing; validation rolls back to the earliest stage invalidated by its evidence.
+Optionality is guard-controlled: data analysis may skip only with a reason when no relevant data exists; visualization may skip only with a reason when there is no figure claim or diagnostic requirement; paper stages may skip only when no trusted paper request exists. `needs_revision` never advances downstream.
 
-The transition table applies only after a stage returns `complete` or `skipped`. `needs_revision` does not advance: the orchestrator retries a locally deficient stage or rolls back to the earliest upstream stage invalidated by new evidence. It preserves the prior result as audit evidence, marks affected later work invalid, and reruns every affected downstream stage through validation.
+## Persistent state and handoff
 
-## Modeling Handoff
-
-`skills/math-modeling-orchestrator/references/handoff-contract.md` defines the shared stage output. The minimum stable interface is:
-
-```yaml
-schema_version: "1"
-task:
-  statement: "Original problem or a faithful summary"
-  objectives: []
-  constraints: []
-state:
-  current_stage: "problem-analysis"
-  status: "complete"
-  validation_status: "pending"
-  completed_stages:
-    - "problem-analysis"
-  invalidated_stages: []
-quality:
-  checks: []
-  warnings: []
-  confidence: "medium"
-result:
-  summary: "Stage result"
-  details: []
-next:
-  recommended_stage: "data-analysis"
-  rationale: "Why"
-  alternatives: []
-```
-
-Stages also preserve assumptions, variables, data provenance, methods, decisions, equations, artifacts, failed runs, and validation evidence when those fields apply. `completed_stages` contains only current results; superseded results remain as audit evidence while `invalidated_stages` identifies what must be rerun. A prior validation pass becomes `stale` as soon as any input stage is invalidated. Empty collections are valid; fabricated values are not.
-
-The handoff is a structured model-output contract. Users do not need a database or state file. Persist it only when the active modeling project benefits from an auditable artifact.
-
-## Validation layers
-
-1. `scripts/validate_suite.py` checks source structure, regular-file/symlink boundaries for metadata, manifest fields, skill metadata, stage references, handoff fields, and routing invariants.
-2. `python3 -m unittest discover -s tests -p 'test_*.py' -v` checks failures as well as the happy path without model APIs.
-3. `scripts/build_bundle.py` creates a clean standard marketplace bundle outside the source tree.
-4. `scripts/validate_bundle.py` proves that the marketplace path resolves inside the bundle, applies the archive-tree policy, and checks that the copied plugin still passes suite validation.
-5. The bundled Codex plugin and skill validators provide an optional compatibility check when their PyYAML dependency is available.
-
-## Installation boundary
-
-The repository root is the plugin source. A generated bundle adapts it to Codex's local marketplace layout:
+The user-supplied project root contains immutable evidence:
 
 ```text
-bundle/.agents/plugins/marketplace.json
-bundle/plugins/math-modeling-suite/.codex-plugin/plugin.json
+modeling_project/
+├── input/                         # original inputs, copied read-only
+├── iterations/
+│   ├── v001/                      # first immutable snapshot
+│   └── v002/                      # new snapshot for result-affecting changes
+├── current.json                   # active iteration and per-question source pointers
+├── qa/                            # append-only gates and stale reports
+└── archive/                       # retained audit notes
 ```
 
-`install_local.py` is dry-run by default. `--apply` is the authorization boundary for `codex plugin marketplace add` and `codex plugin add`.
+Each iteration has `state/`, `code/`, `data/`, `results/`, `figures/`, `paper/`, and `manifests/`. Runtime handoffs and machine records use schema version `2`; legacy schema-version-1 handoffs are migrated through `scripts/migrate_handoff.py` before runtime validation. State records current stage/status, validation status (`pending`, `pass`, `needs_revision`, `stale`), completed stages, invalidated stages, assumptions, decisions, artifacts, hashes, and bounded next-stage rationale.
 
-A configured local marketplace points to an exact bundle root. `--marketplace-registered` skips registration only for that same path; it must not be used with an unrelated fresh temporary directory. Refresh an existing development marketplace through a recoverable directory swap at its registered path, then reinstall the plugin and start a new thread.
+Any input, code, parameter, method, result, or registered source change creates a new immutable iteration before further work. `current.json` may mix question sources (for example Q1 from `v001`, Q2 from `v002`); dependent runs, figures, validation, and paper evidence are marked stale and old files remain untouched. Downstream authorization reloads the canonical current pointer, handoff, manifests, gates, and real file hashes; a pointer status, recommendation, or self-authored receipt is never sufficient.
 
-The two `--apply` Codex commands are external and sequential rather than transactional. If marketplace registration succeeds but plugin installation fails, inspect the configured marketplace first; retry with `--marketplace-registered` for the exact path, or intentionally remove the newly created `math-modeling-local` marketplace before retrying. The installer never removes an existing marketplace automatically.
+Gate 1 confirms interpretation and assumptions. Gate 2 confirms each model, baseline, parameter source, and validation plan. Gate 3 freezes current results, run/validation manifests, and any figures. Validation failure cannot route to paper writing or production; completion also requires current accepted-model, dependency, environment, official-rule, and (when requested) paper-finalization evidence.
 
-Bundle construction stages files in a temporary sibling, validates the staged plugin, and publishes the finished tree atomically. The builder excludes environment files and repository metadata; build or reuse rejects symlinks, unreadable directories, sockets/FIFOs/devices, Git submodules, generated cache paths, known credential filenames, and private-key suffixes, while reuse also rejects any environment file injected after the build. This is deliberately a filename and filesystem-type policy rather than a content-level secret scanner; ordinary-looking files still require human review before distribution.
+## Validation and bundle boundaries
 
-## Adding a stage or specialization
+1. `python3 scripts/validate_suite.py` checks regular-file metadata, manifest schema, frontmatter, stage registry, support contract, handoff fields, guards, and routing invariants.
+2. `python3 -m unittest discover -s tests -p 'test_*.py' -v` exercises deterministic unit, contract, and offline end-to-end behavior without model APIs.
+3. `python3 scripts/build_bundle.py --output <outside-source-dir>` builds a temporary sibling marketplace bundle and validates the staged plugin before atomic publication.
+4. `python3 scripts/validate_bundle.py <bundle>` checks marketplace path resolution, archive-tree policy, copied plugin validation, and regular-file/symlink/special-file boundaries.
 
-Add a new skill only when it has a distinct trigger, input/output boundary, and useful independent invocation. Then:
+Bundle construction excludes environment files, Git metadata, worktrees, generated bundles, bytecode, and common caches. It rejects symlinks, symlinked components, special nodes, Git submodules, known credential filenames, and private-key suffixes. This is a deterministic filename/type boundary, not a content-level secret scanner; human review remains required. The installed Skill tree is read-only from the perspective of user projects, and project-specific inputs/results never belong in the bundle.
 
-1. Create `skills/<prefixed-name>/SKILL.md` and `agents/openai.yaml`.
-2. Add its entry, completion transitions, optionality, and gates to `workflow.json` if the orchestrator routes to it.
-3. Define what it adds to the Modeling Handoff and what it must not change.
-4. Extend validator constants and structural tests.
-5. Run a behavior fixture that asserts a routing or quality invariant rather than exact prose.
-6. Validate the source and a generated bundle before reinstalling.
+## Extending the suite
 
-Prefer references inside a stage for substantial method families. Do not grow the orchestrator into a catalog of algorithms.
-
-## Contract evolution
-
-Compatible additions may keep handoff `schema_version: "1"`. Removing a field, changing field meaning, narrowing an accepted value, or altering required routing semantics is incompatible: increment the schema version and document how an existing handoff resumes or migrates.
-
-Stable plugin releases use SemVer. Local development changes only the `+codex.<cachebuster>` build metadata so Codex loads a new cache key without pretending a new public release exists.
+Add a routed stage only when it has a distinct trigger, input/output boundary, handoff fields, guard, and transition. Add maintained methods, drawing guidance, or templates under the owning Skill’s `references/` and `assets/` directories rather than expanding the orchestrator. Update the validator, behavior fixtures, tests, README, architecture, development guide, and changelog, then build and validate a bundle and run both offline and supplied-project smoke checks. See [development.md](development.md).

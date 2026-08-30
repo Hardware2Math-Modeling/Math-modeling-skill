@@ -13,15 +13,20 @@ from urllib.parse import urlparse
 
 PLUGIN_NAME = "math-modeling-suite"
 ORCHESTRATOR_SKILL = "math-modeling-orchestrator"
-STAGE_SKILLS = (
+WORKFLOW_STAGE_SKILLS = (
+    "math-modeling-preflight",
     "math-modeling-problem-analysis",
     "math-modeling-data-analysis",
     "math-modeling-model-construction",
     "math-modeling-model-solving",
+    "math-modeling-visualization",
     "math-modeling-validation",
     "math-modeling-paper-writing",
+    "math-modeling-paper-production",
 )
-ALL_SKILLS = (ORCHESTRATOR_SKILL, *STAGE_SKILLS)
+SUPPORT_SKILLS = ("math-modeling-method-library",)
+STAGE_SKILLS = WORKFLOW_STAGE_SKILLS
+ALL_SKILLS = (ORCHESTRATOR_SKILL, *WORKFLOW_STAGE_SKILLS, *SUPPORT_SKILLS)
 HANDOFF_REQUIRED_FIELDS = ("schema_version", "state", "result", "next")
 HANDOFF_STATUSES = ("pending", "in_progress", "complete", "needs_revision", "skipped")
 HANDOFF_STATE_FIELDS = (
@@ -130,10 +135,12 @@ _INTERFACE_KEYS = {
     "screenshots",
 }
 _EXPECTED_TRANSITIONS = {
+    "preflight": ["problem-analysis"],
     "problem-analysis": ["data-analysis", "model-construction"],
     "data-analysis": ["model-construction"],
     "model-construction": ["model-solving"],
-    "model-solving": ["validation"],
+    "model-solving": ["visualization", "validation"],
+    "visualization": ["validation"],
     "validation-pass": ["paper-writing", "complete"],
     "validation-fail": [
         "problem-analysis",
@@ -141,7 +148,8 @@ _EXPECTED_TRANSITIONS = {
         "model-construction",
         "model-solving",
     ],
-    "paper-writing": ["complete"],
+    "paper-writing": ["paper-production"],
+    "paper-production": ["complete"],
 }
 
 _WORKFLOW_KEYS = {
@@ -150,10 +158,44 @@ _WORKFLOW_KEYS = {
     "stages",
     "transitions",
     "guards",
+    "authorization_policy",
     "handoff",
 }
 _WORKFLOW_STAGE_KEYS = {"id", "skill", "optional"}
-_WORKFLOW_GUARD_KEYS = {"data-analysis-skip", "paper-writing"}
+_EXPECTED_GUARDS = {
+    "data-analysis-skip": {"allowed": True, "requires_reason": True},
+    "visualization-skip": {
+        "allowed": True,
+        "requires_reason": True,
+        "requires_no_figure_claim": True,
+    },
+    "paper-writing": {
+        "optional": True,
+        "requires_trusted_paper_request": True,
+        "requires_current_question_dependencies": True,
+        "requires_validation_pass": True,
+        "requires_gate3": True,
+        "requires_no_invalidated_inputs": True,
+    },
+    "paper-production": {
+        "optional": True,
+        "requires_trusted_paper_request": True,
+        "requires_current_question_dependencies": True,
+        "requires_paper_writing": True,
+    },
+}
+_WORKFLOW_GUARD_KEYS = set(_EXPECTED_GUARDS)
+_EXPECTED_AUTHORIZATION_POLICY = {
+    "evaluator": "scripts/orchestrator_policy.py:authorization_errors",
+    "workflow_guards_exhaustive": False,
+}
+_EXPECTED_SUPPORT_CONTRACT = {
+    "schema_version": "1",
+    "skill": "math-modeling-method-library",
+    "workflow_role": "support",
+    "resource_access": "read_only",
+    "project_state_access": "none",
+}
 _WORKFLOW_HANDOFF_KEYS = {
     "required_fields",
     "statuses",
@@ -204,6 +246,23 @@ def _read_json_object(path: Path, errors: list[str], label: str) -> tuple[dict[s
 
 def _is_nonempty_string(value: Any) -> bool:
     return isinstance(value, str) and bool(value.strip())
+
+
+def _exact_value_equal(actual: Any, expected: Any) -> bool:
+    """Compare JSON-like values without treating booleans as integers."""
+    if type(actual) is not type(expected):
+        return False
+    if isinstance(expected, dict):
+        return set(actual) == set(expected) and all(
+            _exact_value_equal(actual[key], value)
+            for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return len(actual) == len(expected) and all(
+            _exact_value_equal(actual_item, expected_item)
+            for actual_item, expected_item in zip(actual, expected)
+        )
+    return actual == expected
 
 
 def _lexical_absolute(path: Path) -> Path:
@@ -259,6 +318,23 @@ def ensure_no_symlink_components(path: Path, label: str) -> Path:
                 raise ValueError(f"{label} must not be a symbolic link: {current}")
             raise ValueError(f"{label} must not contain a symbolic link: {current}")
     return absolute
+
+
+def ensure_outside_plugin_root(path: Path, label: str) -> Path:
+    """Reject runtime paths at or below a directory containing a plugin manifest."""
+
+    safe = ensure_no_symlink_components(path, label)
+    for ancestor in (safe, *safe.parents):
+        marker = ancestor / ".codex-plugin" / "plugin.json"
+        try:
+            mode = marker.lstat().st_mode
+        except FileNotFoundError:
+            continue
+        except OSError as error:
+            raise ValueError(f"{label} plugin boundary cannot be inspected: {marker}") from error
+        if stat.S_ISREG(mode) or stat.S_ISLNK(mode):
+            raise ValueError(f"{label} must not be at or below a plugin root: {ancestor}")
+    return safe
 
 
 def is_sensitive_relative_path(path: Path) -> bool:
@@ -649,12 +725,54 @@ def _validate_skills(root: Path, errors: list[str]) -> None:
                         f"{label} frontmatter description must not contain angle brackets"
                     )
             if skill == ORCHESTRATOR_SKILL:
-                for stage in STAGE_SKILLS:
+                for stage in WORKFLOW_STAGE_SKILLS:
                     if stage not in text:
                         errors.append(f"{label} must mention {stage}")
+            elif skill in SUPPORT_SKILLS:
+                if "references/support-contract.json" not in text:
+                    errors.append(
+                        f"{label} must reference references/support-contract.json"
+                    )
             elif "../math-modeling-orchestrator/references/handoff-contract.md" not in text:
                 errors.append(f"{label} must reference shared handoff contract")
         _validate_agent(skill_dir / "agents" / "openai.yaml", skill, errors)
+
+
+def _validate_support_contract(root: Path, errors: list[str]) -> None:
+    label = "skills/math-modeling-method-library/references/support-contract.json"
+    contract_path = root / label
+    contract, _ = _read_json_object(contract_path, errors, label)
+    if contract is None:
+        return
+
+    expected_keys = set(_EXPECTED_SUPPORT_CONTRACT)
+    unexpected = sorted(set(contract) - expected_keys)
+    missing = sorted(expected_keys - set(contract))
+    if unexpected:
+        errors.append(
+            "method-library support contract contains unsupported keys: "
+            + ", ".join(unexpected)
+        )
+    if missing:
+        errors.append(
+            "method-library support contract is missing keys: " + ", ".join(missing)
+        )
+
+    expected_labels = {
+        "schema_version": '"1"',
+        "skill": "math-modeling-method-library",
+        "workflow_role": "support",
+        "resource_access": "read_only",
+        "project_state_access": "none",
+    }
+    for field, expected_value in _EXPECTED_SUPPORT_CONTRACT.items():
+        if field in contract and not _exact_value_equal(
+            contract[field], expected_value
+        ):
+            errors.append(
+                f"method-library support contract {field} must be "
+                f"{expected_labels[field]}"
+            )
 
 
 def _validate_workflow(root: Path, errors: list[str]) -> None:
@@ -672,8 +790,8 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
         )
     if missing_workflow:
         errors.append("workflow is missing keys: " + ", ".join(missing_workflow))
-    if workflow.get("schema_version") != "1":
-        errors.append('workflow schema_version must be "1"')
+    if workflow.get("schema_version") != "2":
+        errors.append('workflow schema_version must be "2"')
     if workflow.get("orchestrator") != ORCHESTRATOR_SKILL:
         errors.append(f"workflow orchestrator must be {ORCHESTRATOR_SKILL}")
     stages = workflow.get("stages")
@@ -683,7 +801,7 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
         registered = [stage.get("skill") for stage in stages]
         if not all(isinstance(skill, str) for skill in registered):
             errors.append("workflow stages must contain string skill values")
-        elif registered != list(STAGE_SKILLS):
+        elif registered != list(WORKFLOW_STAGE_SKILLS):
             errors.append("workflow stages must register required skills in order")
         for stage in stages:
             if not isinstance(stage, dict):
@@ -702,12 +820,15 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
             if isinstance(skill, str) and skill not in ALL_SKILLS:
                 errors.append(f"workflow stage references unknown skill: {skill}")
         required_optional = {
+            "math-modeling-preflight": False,
             "math-modeling-problem-analysis": False,
             "math-modeling-data-analysis": True,
             "math-modeling-model-construction": False,
             "math-modeling-model-solving": False,
+            "math-modeling-visualization": True,
             "math-modeling-validation": False,
             "math-modeling-paper-writing": True,
+            "math-modeling-paper-production": True,
         }
         for stage in stages:
             skill = stage.get("skill")
@@ -758,22 +879,9 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
     if not isinstance(guards, dict):
         errors.append("workflow guards must be an object")
     else:
-        if set(guards) != {"data-analysis-skip", "paper-writing"}:
-            errors.append("workflow guards must contain only data-analysis-skip and paper-writing")
-        for guard_name, expected_guard in (
-            (
-                "data-analysis-skip",
-                {"allowed": True, "requires_reason": True},
-            ),
-            (
-                "paper-writing",
-                {
-                    "optional": True,
-                    "requires_validation_pass": True,
-                    "requires_no_invalidated_inputs": True,
-                },
-            ),
-        ):
+        if set(guards) != _WORKFLOW_GUARD_KEYS:
+            errors.append("workflow guards must define the required guard set")
+        for guard_name, expected_guard in _EXPECTED_GUARDS.items():
             guard = guards.get(guard_name)
             if not isinstance(guard, dict):
                 errors.append(f"workflow guard {guard_name} must be an object")
@@ -784,17 +892,24 @@ def _validate_workflow(root: Path, errors: list[str]) -> None:
                     f"workflow guard {guard_name} contains unsupported keys: "
                     + ", ".join(unexpected_guard)
                 )
-        if guards.get("data-analysis-skip") != {"allowed": True, "requires_reason": True}:
-            errors.append("workflow data-analysis-skip guard must require allowed and requires_reason")
-        if guards.get("paper-writing") != {
-            "optional": True,
-            "requires_validation_pass": True,
-            "requires_no_invalidated_inputs": True,
-        }:
-            errors.append(
-                "workflow paper-writing guard must require a current validation pass "
-                "and no invalidated inputs"
-            )
+            if not _exact_value_equal(guard, expected_guard):
+                errors.append(f"workflow guard {guard_name} must match its required contract")
+
+    authorization_policy = workflow.get("authorization_policy")
+    if not isinstance(authorization_policy, dict) or not _exact_value_equal(
+        authorization_policy,
+        _EXPECTED_AUTHORIZATION_POLICY,
+    ):
+        errors.append(
+            "workflow authorization_policy must name the authoritative evaluator "
+            "and mark guards non-exhaustive"
+        )
+    else:
+        _read_text(
+            root / "scripts" / "orchestrator_policy.py",
+            errors,
+            "workflow authorization evaluator",
+        )
 
     handoff = workflow.get("handoff")
     if not isinstance(handoff, dict):
@@ -855,5 +970,6 @@ def validate_suite(root: Path) -> list[str]:
     errors: list[str] = []
     _validate_manifest(root, errors)
     _validate_skills(root, errors)
+    _validate_support_contract(root, errors)
     _validate_workflow(root, errors)
     return errors

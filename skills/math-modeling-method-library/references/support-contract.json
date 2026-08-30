@@ -1,0 +1,7 @@
+{
+  "schema_version": "1",
+  "skill": "math-modeling-method-library",
+  "workflow_role": "support",
+  "resource_access": "read_only",
+  "project_state_access": "none"
+}

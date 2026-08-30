@@ -17,6 +17,25 @@ from suite_validation import (  # noqa: E402
 )
 
 
+EXPECTED_WORKFLOW_STAGE_SKILLS = (
+    "math-modeling-preflight",
+    "math-modeling-problem-analysis",
+    "math-modeling-data-analysis",
+    "math-modeling-model-construction",
+    "math-modeling-model-solving",
+    "math-modeling-visualization",
+    "math-modeling-validation",
+    "math-modeling-paper-writing",
+    "math-modeling-paper-production",
+)
+EXPECTED_SUPPORT_SKILLS = ("math-modeling-method-library",)
+EXPECTED_ALL_SKILLS = (
+    "math-modeling-orchestrator",
+    *EXPECTED_WORKFLOW_STAGE_SKILLS,
+    *EXPECTED_SUPPORT_SKILLS,
+)
+
+
 def write_json(path, payload):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -43,11 +62,26 @@ def make_valid_suite(root):
     }
     write_json(root / ".codex-plugin" / "plugin.json", manifest)
 
-    for skill in ALL_SKILLS:
+    policy = root / "scripts" / "orchestrator_policy.py"
+    policy.parent.mkdir()
+    policy.write_text(
+        "def authorization_errors(action, evidence):\n    return []\n",
+        encoding="utf-8",
+    )
+
+    for skill in EXPECTED_ALL_SKILLS:
         skill_dir = root / "skills" / skill
         skill_dir.mkdir(parents=True, exist_ok=True)
-        body = "\n".join(f"- {stage}" for stage in STAGE_SKILLS)
-        if skill != "math-modeling-orchestrator":
+        body = "\n".join(f"- {stage}" for stage in EXPECTED_WORKFLOW_STAGE_SKILLS)
+        if skill in EXPECTED_SUPPORT_SKILLS:
+            body = (
+                "## Resource boundary\n\n"
+                "Catalog/reference resources are read-only.\n\n"
+                "## State boundary\n\n"
+                "Must not write project state.\n\n"
+                "See [support contract](references/support-contract.json)."
+            )
+        elif skill != "math-modeling-orchestrator":
             body = "See ../math-modeling-orchestrator/references/handoff-contract.md."
         skill_dir.joinpath("SKILL.md").write_text(
             "---\n"
@@ -95,21 +129,29 @@ def make_valid_suite(root):
     )
 
     workflow = {
-        "schema_version": "1",
+        "schema_version": "2",
         "orchestrator": "math-modeling-orchestrator",
         "stages": [
             {
                 "id": skill.removeprefix("math-modeling-"),
                 "skill": skill,
-                "optional": skill in {"math-modeling-data-analysis", "math-modeling-paper-writing"},
+                "optional": skill
+                in {
+                    "math-modeling-data-analysis",
+                    "math-modeling-visualization",
+                    "math-modeling-paper-writing",
+                    "math-modeling-paper-production",
+                },
             }
-            for skill in STAGE_SKILLS
+            for skill in EXPECTED_WORKFLOW_STAGE_SKILLS
         ],
         "transitions": {
+            "preflight": ["problem-analysis"],
             "problem-analysis": ["data-analysis", "model-construction"],
             "data-analysis": ["model-construction"],
             "model-construction": ["model-solving"],
-            "model-solving": ["validation"],
+            "model-solving": ["visualization", "validation"],
+            "visualization": ["validation"],
             "validation-pass": ["paper-writing", "complete"],
             "validation-fail": [
                 "problem-analysis",
@@ -117,15 +159,34 @@ def make_valid_suite(root):
                 "model-construction",
                 "model-solving",
             ],
-            "paper-writing": ["complete"],
+            "paper-writing": ["paper-production"],
+            "paper-production": ["complete"],
         },
         "guards": {
             "data-analysis-skip": {"allowed": True, "requires_reason": True},
+            "visualization-skip": {
+                "allowed": True,
+                "requires_reason": True,
+                "requires_no_figure_claim": True,
+            },
             "paper-writing": {
                 "optional": True,
+                "requires_trusted_paper_request": True,
+                "requires_current_question_dependencies": True,
                 "requires_validation_pass": True,
+                "requires_gate3": True,
                 "requires_no_invalidated_inputs": True,
             },
+            "paper-production": {
+                "optional": True,
+                "requires_trusted_paper_request": True,
+                "requires_current_question_dependencies": True,
+                "requires_paper_writing": True,
+            },
+        },
+        "authorization_policy": {
+            "evaluator": "scripts/orchestrator_policy.py:authorization_errors",
+            "workflow_guards_exhaustive": False,
         },
         "handoff": {
             "required_fields": list(HANDOFF_REQUIRED_FIELDS),
@@ -141,9 +202,28 @@ def make_valid_suite(root):
         },
     }
     write_json(root / "skills" / "math-modeling-orchestrator" / "references" / "workflow.json", workflow)
+    write_json(
+        root
+        / "skills"
+        / "math-modeling-method-library"
+        / "references"
+        / "support-contract.json",
+        {
+            "schema_version": "1",
+            "skill": "math-modeling-method-library",
+            "workflow_role": "support",
+            "resource_access": "read_only",
+            "project_state_access": "none",
+        },
+    )
 
 
 class SuiteValidationTests(unittest.TestCase):
+    def test_complete_skill_registry_has_routed_and_support_boundaries(self):
+        self.assertEqual(EXPECTED_WORKFLOW_STAGE_SKILLS, STAGE_SKILLS)
+        self.assertEqual(EXPECTED_ALL_SKILLS, ALL_SKILLS)
+        self.assertNotIn("math-modeling-method-library", STAGE_SKILLS)
+
     def test_rejects_malformed_suite_root(self):
         self.assertIn(
             "suite root must be a valid path",
@@ -224,6 +304,135 @@ class SuiteValidationTests(unittest.TestCase):
             validation_dir.rmdir()
             errors = validate_suite(root)
             self.assertTrue(any("missing required skills" in error for error in errors))
+
+    def test_missing_new_required_skill_is_reported(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            preflight_dir = root / "skills" / "math-modeling-preflight"
+            for path in sorted(preflight_dir.rglob("*"), reverse=True):
+                if path.is_file():
+                    path.unlink()
+                else:
+                    path.rmdir()
+            preflight_dir.rmdir()
+            self.assertTrue(
+                any(
+                    "math-modeling-preflight" in error
+                    for error in validate_suite(root)
+                )
+            )
+
+    def test_support_skill_boundary_prose_does_not_define_machine_contract(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            method_library = (
+                root / "skills" / "math-modeling-method-library" / "SKILL.md"
+            )
+            method_library.write_text(
+                "---\n"
+                "name: math-modeling-method-library\n"
+                "description: Use when a stage needs reusable modeling references.\n"
+                "---\n\n"
+                "Use the linked [support contract](references/support-contract.json). "
+                "Consult reference material without altering runtime state.\n",
+                encoding="utf-8",
+            )
+            self.assertEqual([], validate_suite(root))
+
+    def test_support_contract_rejects_invalid_access_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            contract_path = (
+                root
+                / "skills"
+                / "math-modeling-method-library"
+                / "references"
+                / "support-contract.json"
+            )
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            for field, invalid_value in (
+                ("resource_access", "read_write"),
+                ("project_state_access", "write"),
+            ):
+                with self.subTest(field=field):
+                    mutated = dict(contract)
+                    mutated[field] = invalid_value
+                    write_json(contract_path, mutated)
+                    self.assertIn(
+                        f"method-library support contract {field} must be "
+                        + ("read_only" if field == "resource_access" else "none"),
+                        validate_suite(root),
+                    )
+
+    def test_support_contract_rejects_missing_extra_and_wrong_type_fields(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            contract_path = (
+                root
+                / "skills"
+                / "math-modeling-method-library"
+                / "references"
+                / "support-contract.json"
+            )
+            contract = json.loads(contract_path.read_text(encoding="utf-8"))
+            variants = []
+            missing = dict(contract)
+            missing.pop("workflow_role")
+            variants.append(
+                (
+                    missing,
+                    "method-library support contract is missing keys: workflow_role",
+                )
+            )
+            extra = {**contract, "unexpected": True}
+            variants.append(
+                (
+                    extra,
+                    "method-library support contract contains unsupported keys: unexpected",
+                )
+            )
+            wrong_type = {**contract, "schema_version": 1}
+            variants.append(
+                (
+                    wrong_type,
+                    'method-library support contract schema_version must be "1"',
+                )
+            )
+            for payload, expected_error in variants:
+                with self.subTest(expected=expected_error):
+                    write_json(contract_path, payload)
+                    self.assertIn(expected_error, validate_suite(root))
+
+    def test_support_contract_rejects_invalid_json_and_symlink(self):
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            root = base / "suite"
+            make_valid_suite(root)
+            contract_path = (
+                root
+                / "skills"
+                / "math-modeling-method-library"
+                / "references"
+                / "support-contract.json"
+            )
+            contract_path.write_text("{", encoding="utf-8")
+            label = "skills/math-modeling-method-library/references/support-contract.json"
+            self.assertIn(f"invalid JSON in {label}", validate_suite(root))
+
+            external = base / "external-support-contract.json"
+            contract_path.replace(external)
+            try:
+                contract_path.symlink_to(external)
+            except (NotImplementedError, OSError) as error:
+                self.skipTest(f"symlinks unavailable: {error}")
+            self.assertIn(
+                f"{label} must not use symbolic links",
+                validate_suite(root),
+            )
 
     def test_invalid_validation_fail_route_is_reported_exactly(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -378,6 +587,80 @@ class SuiteValidationTests(unittest.TestCase):
                 "workflow handoff contains unsupported keys: unexpected", errors
             )
 
+    def test_authorization_policy_pointer_must_be_exact(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            workflow_path = (
+                root
+                / "skills"
+                / "math-modeling-orchestrator"
+                / "references"
+                / "workflow.json"
+            )
+            workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+            workflow["authorization_policy"]["workflow_guards_exhaustive"] = True
+            write_json(workflow_path, workflow)
+            self.assertIn(
+                "workflow authorization_policy must name the authoritative evaluator "
+                "and mark guards non-exhaustive",
+                validate_suite(root),
+            )
+
+    def test_authorization_policy_pointer_must_resolve_to_regular_file(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            (root / "scripts/orchestrator_policy.py").unlink()
+            self.assertIn(
+                "missing workflow authorization evaluator",
+                validate_suite(root),
+            )
+
+    def test_each_guard_rejects_unknown_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            workflow_path = root / "skills" / "math-modeling-orchestrator" / "references" / "workflow.json"
+            workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+            for guard_name in workflow["guards"]:
+                with self.subTest(guard=guard_name):
+                    mutated = json.loads(json.dumps(workflow))
+                    mutated["guards"][guard_name]["unexpected"] = True
+                    write_json(workflow_path, mutated)
+                    self.assertIn(
+                        f"workflow guard {guard_name} contains unsupported keys: unexpected",
+                        validate_suite(root),
+                    )
+
+    def test_all_guard_booleans_reject_integer_substitutes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            make_valid_suite(root)
+            workflow_path = root / "skills" / "math-modeling-orchestrator" / "references" / "workflow.json"
+            workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+            boolean_fields = [
+                (guard_name, field_name, value)
+                for guard_name, guard in workflow["guards"].items()
+                for field_name, value in guard.items()
+                if type(value) is bool
+            ]
+            self.assertTrue(boolean_fields)
+            for guard_name, field_name, _ in boolean_fields:
+                for integer_value in (0, 1):
+                    with self.subTest(
+                        guard=guard_name,
+                        field=field_name,
+                        substitute=integer_value,
+                    ):
+                        mutated = json.loads(json.dumps(workflow))
+                        mutated["guards"][guard_name][field_name] = integer_value
+                        write_json(workflow_path, mutated)
+                        self.assertIn(
+                            f"workflow guard {guard_name} must match its required contract",
+                            validate_suite(root),
+                        )
+
     def test_skill_description_must_be_trigger_oriented(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -487,8 +770,8 @@ class SuiteValidationTests(unittest.TestCase):
             make_valid_suite(root)
             workflow_path = root / "skills" / "math-modeling-orchestrator" / "references" / "workflow.json"
             workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
-            workflow["stages"][0]["optional"] = True
-            workflow["stages"][1]["optional"] = False
+            workflow["stages"][1]["optional"] = True
+            workflow["stages"][2]["optional"] = False
             write_json(workflow_path, workflow)
             errors = validate_suite(root)
             self.assertIn(

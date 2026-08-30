@@ -1,7 +1,7 @@
 {
   "name": "math-modeling-suite",
-  "version": "0.1.0",
-  "description": "A staged Codex skill suite for mathematical modeling problems.",
+  "version": "0.2.0",
+  "description": "A mathematical modeling suite with explicit Python execution, LaTeX paper production, and staged verification.",
   "author": {
     "name": "硬件重组之打数模"
   },
@@ -14,8 +14,8 @@
   "skills": "./skills/",
   "interface": {
     "displayName": "Math Modeling Suite",
-    "shortDescription": "Solve modeling problems in explicit stages",
-    "longDescription": "Coordinate problem analysis, data analysis, model construction, model solving, validation, and paper writing for mathematical modeling work.",
+    "shortDescription": "Staged modeling with Python and LaTeX",
+    "longDescription": "Route work through preflight, problem-analysis, data-analysis, model-construction, model-solving, visualization, validation, paper-writing, and paper-production, with a read-only method library.",
     "developerName": "硬件重组之打数模",
     "category": "Education & Research",
     "capabilities": [
@@ -24,7 +24,7 @@
       "Write"
     ],
     "defaultPrompt": [
-      "Use $math-modeling-orchestrator to work through this modeling problem."
+      "Use $math-modeling-orchestrator to route this problem through preflight, problem-analysis, data-analysis when required, model-construction, model-solving, visualization when required, validation, paper-writing when requested, and paper-production when requested; consult the read-only method library for maintained methods."
     ]
   }
 }

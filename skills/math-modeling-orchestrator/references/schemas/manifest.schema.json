@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "manifest.schema.json",
+  "title": "Math modeling evidence manifest v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "manifest_type", "created_at", "entries"],
+  "properties": {
+    "schema_version": {"const": "2"},
+    "manifest_type": {"enum": ["input", "environment", "run", "figure", "paper"]},
+    "created_at": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?Z$"},
+    "entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "minProperties": 1,
+        "additionalProperties": {"$ref": "#/$defs/evidenceValue"}
+      }
+    }
+  },
+  "$defs": {
+    "evidenceValue": {
+      "oneOf": [
+        {"type": "string", "minLength": 1, "pattern": "\\S"},
+        {"type": ["number", "boolean", "null"]},
+        {"type": "array", "items": {"$ref": "#/$defs/evidenceValue"}},
+        {"type": "object", "additionalProperties": {"$ref": "#/$defs/evidenceValue"}}
+      ]
+    }
+  }
+}

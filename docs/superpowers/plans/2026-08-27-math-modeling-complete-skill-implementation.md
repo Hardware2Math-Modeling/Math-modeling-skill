@@ -73,11 +73,11 @@
 - Create: no repository file
 - Test: existing tests/
 
-- [ ] **Step 1: Prepare the execution worktree with the worktree skill**
+- [x] **Step 1: Prepare the execution worktree with the worktree skill**
 
 At implementation time invoke superpowers:using-git-worktrees and create an isolated worktree outside the source tree. Do not edit the main checkout while implementation tasks are running.
 
-- [ ] **Step 2: Record the baseline commands and expected output**
+- [x] **Step 2: Record the baseline commands and expected output**
 
 Run from the isolated worktree:
 
@@ -97,7 +97,7 @@ Generated logs and environment files stay outside the repository; the first impl
 - Modify: tests/test_repository_contract.py
 - Create: tests/test_workflow_contract.py
 
-- [ ] **Step 1: Add failing registry and guard tests**
+- [x] **Step 1: Add failing registry and guard tests**
 
 Add tests that assert the new discoverable skills and exact stage registry:
 
@@ -136,7 +136,7 @@ Run:
 
 Expected: FAIL because the current constants and workflow contain only the original six stages.
 
-- [ ] **Step 2: Implement the registry as separate discoverable and routed sets**
+- [x] **Step 2: Implement the registry as separate discoverable and routed sets**
 
 In scripts/suite_validation.py define these exact constants:
 
@@ -157,7 +157,7 @@ In scripts/suite_validation.py define these exact constants:
 
 Extend supported stage metadata, guards, and transition constants to require the exact order above. Add visualization-skip and paper-production guards, and reject unknown stage/guard keys. Update _validate_skills so SUPPORT_SKILLS are checked for their own catalog/reference contract instead of being forced to reference the stage handoff. Keep the existing symlink, credential-name, frontmatter, and bundle safety checks unchanged.
 
-- [ ] **Step 3: Update the machine-readable workflow**
+- [x] **Step 3: Update the machine-readable workflow**
 
 Replace workflow.json with schema_version: "2" and these routes:
 
@@ -184,7 +184,7 @@ Replace workflow.json with schema_version: "2" and these routes:
 
 The stage entries mark preflight, problem-analysis, model-construction, model-solving, and validation as required; data-analysis, visualization, paper-writing, and paper-production are conditionally optional under their guards. A visualization stage is required whenever a figure claim exists.
 
-- [ ] **Step 4: Update contract tests and run the focused suite**
+- [x] **Step 4: Update contract tests and run the focused suite**
 
 Update expected lists in tests/test_repository_contract.py, add assertions for the two new handoff paths and the absence of paper routes from validation failure, then run:
 
@@ -192,7 +192,7 @@ Update expected lists in tests/test_repository_contract.py, add assertions for t
 
 Expected: all focused tests pass.
 
-- [ ] **Step 5: Commit the registry change**
+- [x] **Step 5: Commit the registry change**
 
     git add scripts/suite_validation.py skills/math-modeling-orchestrator/references/workflow.json tests/test_suite_validation.py tests/test_repository_contract.py tests/test_workflow_contract.py
     git commit -m "feat: register complete modeling workflow stages"
@@ -210,7 +210,7 @@ Expected: all focused tests pass.
 - Create: tests/fixtures/handoff-v2.json
 - Create: tests/test_handoff_schema.py
 
-- [ ] **Step 1: Write failing schema tests**
+- [x] **Step 1: Write failing schema tests**
 
 Use JSON fixtures created in a temporary directory. Define valid_handoff() by deep-copying tests/fixtures/handoff-v2.json and define invalid variants by changing one field; do not construct a partial object that bypasses the common fixture. The runtime handoff must require all seven semantic objects and reject invented empty strings:
 
@@ -243,7 +243,7 @@ Run:
 
 Expected: FAIL because the schema and migration modules do not exist.
 
-- [ ] **Step 2: Define the complete v2 handoff schema**
+- [x] **Step 2: Define the complete v2 handoff schema**
 
 handoff.schema.json must use additionalProperties: false at the top level, require schema_version, task, state, context, artifacts, quality, result, and next, and constrain:
 
@@ -262,7 +262,7 @@ handoff.schema.json must use additionalProperties: false at the top level, requi
 
 context contains arrays for assumptions, variables, data, methods, decisions, equations, and parameters; artifacts requires relative path, kind, and description. All paths reject absolute components and parent traversal.
 
-- [ ] **Step 3: Implement standard-library validation and migration**
+- [x] **Step 3: Implement standard-library validation and migration**
 
 Implement these functions in scripts/handoff_schema.py:
 
@@ -279,7 +279,7 @@ The validator reports deterministic field paths such as state.validation_status;
 
 validate_handoff.py accepts --input, --mode runtime|legacy, and --json; a nonempty error list exits 1. migrate_handoff.py accepts --input, --output, and --pretty, writes atomically, and refuses to overwrite an existing output.
 
-- [ ] **Step 4: Add schema fixtures and run the focused tests**
+- [x] **Step 4: Add schema fixtures and run the focused tests**
 
 Run:
 
@@ -288,7 +288,7 @@ Run:
 
 Expected: all tests pass and the CLI prints handoff valid for the checked-in valid fixture.
 
-- [ ] **Step 5: Commit the schema contract**
+- [x] **Step 5: Commit the schema contract**
 
     git add skills/math-modeling-orchestrator/references/schemas scripts/handoff_schema.py scripts/validate_handoff.py scripts/migrate_handoff.py tests/test_handoff_schema.py tests/fixtures/handoff-v2.json
     git commit -m "feat: add versioned modeling handoff schemas"
@@ -301,7 +301,7 @@ Expected: all tests pass and the CLI prints handoff valid for the checked-in val
 - Create: tests/test_project_state.py
 - Create: tests/test_manifest.py
 
-- [ ] **Step 1: Write failing state and hash tests**
+- [x] **Step 1: Write failing state and hash tests**
 
 Cover initialization, version numbering, per-question pointers, gate records, and stale propagation. In setUp create self.temp_path, self.input_dir with problem.txt and data.csv, and self.project by calling init_project with the explicit resolved test interpreter:
 
@@ -331,7 +331,7 @@ Run:
 
 Expected: FAIL because no runtime state implementation exists.
 
-- [ ] **Step 2: Implement deterministic manifest primitives**
+- [x] **Step 2: Implement deterministic manifest primitives**
 
 In scripts/manifest.py implement:
 
@@ -352,7 +352,7 @@ In scripts/manifest.py implement:
 
 Reject symlink components, special files, absolute artifact paths, and paths outside the project root. JSON is UTF-8, sorted keys, two-space indentation, and a trailing newline. The input manifest records relative path, byte size, UTC modification time, SHA-256, source label, and read_only: true; it never changes input permissions.
 
-- [ ] **Step 3: Implement project initialization and version operations**
+- [x] **Step 3: Implement project initialization and version operations**
 
 project_state.py exposes:
 
@@ -373,7 +373,7 @@ project_state.py exposes:
 
 init_project requires an existing absolute executable Python file and creates only an empty project layout plus v001; it writes current.json with schema_version, project_id, active_iteration, question_sources, gates, status, and updated_at. create_iteration uses the next zero-padded integer, copies evidence with copytree(source, destination, symlinks=False) only after path checks, writes an iteration manifest, and refuses an existing target. record_gate rejects unknown gate ids/statuses and stores UTC time, hashes, confirmer, note, and schema version. mark_stale updates machine and human reports without deleting old artifacts.
 
-- [ ] **Step 4: Add command-line entry points and test failure modes**
+- [x] **Step 4: Add command-line entry points and test failure modes**
 
 The CLI subcommands are exactly init, new-iteration, gate, and stale; all accept absolute paths and print the resulting JSON path. Add tests for relative Python paths, missing input directories, output collisions, unknown gate ids, and attempts to write through a symlink.
 
@@ -383,7 +383,7 @@ Run:
 
 Expected: all state and safety tests pass.
 
-- [ ] **Step 5: Commit the runtime state layer**
+- [x] **Step 5: Commit the runtime state layer**
 
     git add scripts/manifest.py scripts/project_state.py tests/test_project_state.py tests/test_manifest.py
     git commit -m "feat: add immutable modeling project state"
@@ -398,7 +398,7 @@ Expected: all state and safety tests pass.
 - Create: tests/test_preflight.py
 - Create: tests/test_python_runner.py
 
-- [ ] **Step 1: Write failing environment and runner tests**
+- [x] **Step 1: Write failing environment and runner tests**
 
 Use Path(sys.executable).resolve() as the explicitly supplied test interpreter; never hide it in the fixture. Define RunFailed in scripts/python_runner.py and import it in the test. Assert missing packages produce install advice but do not invoke pip:
 
@@ -426,21 +426,21 @@ Use Path(sys.executable).resolve() as the explicitly supplied test interpreter; 
 
 Run the focused tests and expect import failures.
 
-- [ ] **Step 2: Implement Python and package diagnostics**
+- [x] **Step 2: Implement Python and package diagnostics**
 
 diagnose_environment must reject a relative or non-regular interpreter, run [python, "-c", "import sys; print(sys.executable); print(sys.version)"], and inspect each package with [python, "-c", "import importlib.metadata as m; print(m.version(NAME))"]. The report includes interpreter path, resolved path, version, platform, package status/version, and an install command using that exact path. It never calls pip, chooses another interpreter, or downgrades a package.
 
 Check tools in this order: tectonic, latexmk, xelatex, pdflatex; record executable path/version or missing. A missing LaTeX tool is a warning for result-only work and a blocking error for paper production. A missing user template selects the explicit fallback status, not an error at preflight.
 
-- [ ] **Step 3: Implement the subprocess runner**
+- [x] **Step 3: Implement the subprocess runner**
 
 run_python accepts an explicit cli_mode value of json_io or plain. In json_io mode it builds [python, script, "--input", input_path, "--output", output_path, "--seed", seed]; in plain mode it runs [python, script]. Both modes use a controlled environment containing PYTHONHASHSEED and MPLBACKEND=Agg. It sets a timeout, captures UTF-8 stdout/stderr, writes stdout.log, stderr.log, command.json, and run_manifest.json, computes code/input/output hashes, and raises RunFailed on timeout or nonzero exit. It does not alter the model specification or convert a failed run to success.
 
-- [ ] **Step 4: Write the preflight Skill contract**
+- [x] **Step 4: Write the preflight Skill contract**
 
 math-modeling-preflight/SKILL.md must require the user’s absolute Python path before any model work, ask for project root/template path/competition, describe package and LaTeX diagnostics, explain confirmation before installation, and return a v2 handoff with preflight artifacts. agents/openai.yaml must mention $math-modeling-preflight and retain allow_implicit_invocation: true.
 
-- [ ] **Step 5: Run and commit**
+- [x] **Step 5: Run and commit**
 
     python3 -m unittest tests/test_preflight.py tests/test_python_runner.py -v
     git add scripts/preflight.py scripts/python_runner.py skills/math-modeling-preflight tests/test_preflight.py tests/test_python_runner.py
@@ -460,7 +460,7 @@ Expected: focused tests pass; no pip or external installation command is observe
 - Create: scripts/method_catalog.py
 - Create: tests/test_method_library.py
 
-- [ ] **Step 1: Define the catalog contract and failing completeness tests**
+- [x] **Step 1: Define the catalog contract and failing completeness tests**
 
 catalog.json entries require id, family, name_zh, trigger_conditions, assumptions, inputs, formula, scale_limit, template, dependencies, failure_signals, validation, figure_roles, paper_notes, and license_notes. Define EXPECTED_FAMILIES as the ten Chinese family ids used by catalog.json. Add tests:
 
@@ -479,7 +479,7 @@ catalog.json entries require id, family, name_zh, trigger_conditions, assumption
             self.assertIn("license_notes", item)
         self.assertNotIn("T" + "ODO", template.read_text(encoding="utf-8"))
 
-- [ ] **Step 2: Add the 30 method definitions**
+- [x] **Step 2: Add the 30 method definitions**
 
 Use exactly these three entries in each family, with Chinese explanation and an English id:
 
@@ -498,7 +498,7 @@ Use exactly these three entries in each family, with Chinese explanation and an 
 
 Every entry must state applicability, assumptions, units, formula, complexity/scale boundary, parameter meanings, failure signals, validation, suggested figures, and paper wording. Sources from public GitHub projects are recorded as inspiration only; include source URL and license status in license_notes and write original templates under MIT repository terms.
 
-- [ ] **Step 3: Implement the common template interface**
+- [x] **Step 3: Implement the common template interface**
 
 Every assets/templates/*.py file must expose this exact interface and deterministic JSON output:
 
@@ -525,11 +525,11 @@ Every assets/templates/*.py file must expose this exact interface and determinis
 
 The shown body is the executable interface smoke implementation; each of the 30 files replaces its values calculation with the named method’s concrete formula while preserving the same JSON contract. The main function reads UTF-8 JSON from --input, writes UTF-8 JSON to --output, accepts --seed, and converts numerical arrays to JSON-safe lists. Templates use only declared baseline dependencies; a method that needs an optional package returns a clear dependency error rather than silently substituting another method. The 30 smoke fixtures contain small deterministic values and are labeled test data.
 
-- [ ] **Step 4: Implement catalog validation and smoke execution**
+- [x] **Step 4: Implement catalog validation and smoke execution**
 
 method_catalog.py exposes load_catalog, validate_catalog, and run_smoke. It rejects duplicate ids, unknown families, missing fields, unsafe template paths, undeclared dependencies, and nonzero template exits. run_smoke invokes the user-supplied interpreter through python_runner.py; it never runs templates with system Python implicitly.
 
-- [ ] **Step 5: Run tests and commit the method library**
+- [x] **Step 5: Run tests and commit the method library**
 
     python3 -m unittest tests/test_method_library.py -v
     python3 scripts/method_catalog.py --root . --check
@@ -552,7 +552,7 @@ Expected: 30 catalog entries, three per family, all static checks pass; smoke ex
 - Create: scripts/visual_qa.py
 - Create: tests/test_figure_qa.py
 
-- [ ] **Step 1: Write failing figure contract tests**
+- [x] **Step 1: Write failing figure contract tests**
 
 In setUp create a project root, one source JSON file, valid PDF/SVG fixtures, and local builders make_manifest(role="evidence", claim_type="data"), make_png_manifest(dpi), and manifest_without_claim. The builders calculate the source hash with scripts/manifest.py so each failure changes exactly one contract field.
 
@@ -576,7 +576,7 @@ In setUp create a project root, one source JSON file, valid PDF/SVG fixtures, an
         errors = validate_figure_manifest(manifest, project_root=self.project)
         self.assertTrue(any("示意图" in error or "conceptual" in error for error in errors))
 
-- [ ] **Step 2: Implement source-hash and file-format checks**
+- [x] **Step 2: Implement source-hash and file-format checks**
 
 figure_qa.py exposes:
 
@@ -589,15 +589,15 @@ figure_qa.py exposes:
 
 Require relative source/output paths, existing regular files, matching SHA-256 for every source, a nonempty claim_id except for explicitly labeled exploratory drafts, axis/units/legend metadata, and status: verified only after all checks pass. Parse PNG dimensions and pHYs DPI from the file header without Pillow; accept PDF/SVG only when their signatures and nonzero sizes are valid. PDF/SVG is preferred; PNG requires both dpi_x and dpi_y at least 300.
 
-- [ ] **Step 3: Add the shared style and export helper**
+- [x] **Step 3: Add the shared style and export helper**
 
 modeling.mplstyle fixes a Unicode-capable font fallback list, line widths, marker sizes, color-blind-safe palette, white background, outward ticks, and savefig.dpi: 300. export_figure.py applies the style, accepts a source result path and a figure manifest path, writes PDF plus PNG (or SVG), and refuses to draw when the source hash in the manifest is stale. It never creates unregistered random data.
 
-- [ ] **Step 4: Implement render QA and write the visualization Skill**
+- [x] **Step 4: Implement render QA and write the visualization Skill**
 
 visual_qa.py checks output dimensions at the requested paper width, invokes pdftoppm when available, and reports missing tools as needs_review rather than pretending that a visual inspection passed. The Skill describes C-A正文图 and C-B诊断图, chart-selection rules, units/precision, grayscale and color-blind checks, figure-caption/claim/reference closure, and the condition for an explicit no-figure skip.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
     python3 -m unittest tests/test_figure_qa.py -v
     git add skills/math-modeling-visualization scripts/figure_qa.py scripts/export_figure.py scripts/visual_qa.py tests/test_figure_qa.py
@@ -614,7 +614,7 @@ Expected: stale source, low DPI, missing labels, conceptual misuse, and malforme
 - Modify: skills/math-modeling-validation/SKILL.md
 - Modify: skills/math-modeling-model-construction/SKILL.md
 
-- [ ] **Step 1: Write failing result-contract tests**
+- [x] **Step 1: Write failing result-contract tests**
 
 Define valid_result() with Q1, a named model, a baseline metric, finite metric values with units and source hashes, a run manifest, one validation cycle, one claim, and freeze_status="draft"; each test mutates only the field under test.
 
@@ -637,15 +637,15 @@ Define valid_result() with Q1, a named model, a baseline metric, finite metric v
         errors = validate_result_payload(payload)
         self.assertTrue(any("finite" in error or "freeze" in error for error in errors))
 
-- [ ] **Step 2: Implement result and claim validation**
+- [x] **Step 2: Implement result and claim validation**
 
 result_contract.py requires question_id, model_id, assumptions, baseline, parameters, metrics, units, run_manifest, validation_plan, claims, and freeze_status. Each metric carries value, unit, source path, source hash, and finite numeric status. Each validation plan carries threshold, split/scope, seed, and method; changing a threshold requires a new validation_cycle_id and preserves the previous outcome. A result cannot be frozen while its run, figure, or validation manifest is stale.
 
-- [ ] **Step 3: Update model-solving and validation Skill instructions**
+- [x] **Step 3: Update model-solving and validation Skill instructions**
 
 Require one result contract per Qn, explicit baseline and acceptance thresholds before execution, fixed seed, structured JSON/CSV output, and evidence-backed rollback. Add Gate 2 and Gate 3 handoff fields without allowing either Skill to mark the whole project complete.
 
-- [ ] **Step 4: Run tests and commit**
+- [x] **Step 4: Run tests and commit**
 
     python3 -m unittest tests/test_result_contract.py -v
     git add scripts/result_contract.py tests/test_result_contract.py skills/math-modeling-model-solving/SKILL.md skills/math-modeling-validation/SKILL.md skills/math-modeling-model-construction/SKILL.md
@@ -659,7 +659,7 @@ Require one result contract per Qn, explicit baseline and acceptance thresholds 
 - Create: tests/test_paper_content.py
 - Modify: skills/math-modeling-paper-writing/SKILL.md
 
-- [ ] **Step 1: Write failing content and abstract tests**
+- [x] **Step 1: Write failing content and abstract tests**
 
 Define valid_content(question_count) with one frozen result claim per question, the required section map, a three-column symbol row, and empty-but-explicit reference/code/AI review arrays. Set self.evidence to a temporary evidence tree containing the matching result manifest.
 
@@ -682,19 +682,19 @@ Define valid_content(question_count) with one frozen result claim per question, 
         content["claims"][0]["source_hash"] = "wrong"
         self.assertTrue(any("hash" in error for error in validate_paper_content(content, evidence_root=self.evidence)))
 
-- [ ] **Step 2: Define the paper-content schema**
+- [x] **Step 2: Define the paper-content schema**
 
 The schema requires language: zh-CN, abstract.intro_sentences with exactly two sentences (background/existence, then work completed), one question_paragraph per detected question, keywords, sections 1 through 8, a three-column symbols array (symbol, description, unit), figure/table references, references, code appendix, AI-use disclosure, and human review records. Numerical claims must carry result path and SHA-256. English abstract fields are rejected unless the template/competition manifest explicitly requests them.
 
-- [ ] **Step 3: Implement content consistency checks**
+- [x] **Step 3: Implement content consistency checks**
 
 paper_content.py exposes validate_paper_content, question_ids, referenced_figures, referenced_tables, and freeze_content. It checks the requested 5.1.1/5.1.2 style headings, every question’s modeling and calculation subsection, \\textbf{} use only in abstract/important claims, no unsupported numbers, and figure/table references that resolve to verified manifests. It does not invent prose or numerical values.
 
-- [ ] **Step 4: Update the paper-writing Skill**
+- [x] **Step 4: Update the paper-writing Skill**
 
 Document the exact Chinese structure: 摘要、关键词、1 问题背景与重述（1.1/1.2）、2 问题分析、3 模型假设、4 符号说明、5 模型的建立与求解（按问分 5.x.1 建模和 5.x.2 计算）、6 模型检验、7 模型评价与推广/改进、8 结论、附录 A–D。 State that Gate 3 and current validation are prerequisites, fallback templates are non-submission, and the writer must report evidence gaps instead of filling them.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
     python3 -m unittest tests/test_paper_content.py -v
     git add skills/math-modeling-paper-production/references/paper-content.schema.json scripts/paper_content.py tests/test_paper_content.py skills/math-modeling-paper-writing/SKILL.md
@@ -713,7 +713,7 @@ Document the exact Chinese structure: 摘要、关键词、1 问题背景与重�
 - Create: tests/test_latex_qa.py
 - Create: tests/test_paper_production.py
 
-- [ ] **Step 1: Write failing template and page-gate tests**
+- [x] **Step 1: Write failing template and page-gate tests**
 
 In setUp create self.user_template and self.fallback as regular temporary directories; the fake compiler writes a minimal valid PDF on success and exits 9 with stderr on failure.
 
@@ -738,19 +738,19 @@ In setUp create self.user_template and self.fallback as regular temporary direct
         self.assertEqual(qa["status"], "needs_revision")
         self.assertNotIn("blank", " ".join(qa["actions"]).lower())
 
-- [ ] **Step 2: Create the Chinese fallback template**
+- [x] **Step 2: Create the Chinese fallback template**
 
 Use ctexart with explicit UTF-8, geometry, caption, booktabs, amsmath, hyperref, and a neutral color palette. Put % BODY_START immediately before section 1 and % BODY_END immediately after section 8 so the QA script can define正文页范围. Include visible labels for fallback/non-official status and the required appendix headings. The fallback README states that it is a compile smoke template and cannot be submitted as an official contest template.
 
-- [ ] **Step 3: Implement template selection and manifest creation**
+- [x] **Step 3: Implement template selection and manifest creation**
 
 select_template(user_template: Path | None, fallback_dir: Path, official_template: Path | None = None) applies the fixed priority user > explicitly specified official > locally verified official > fallback. It copies files into the current iteration’s paper/template/, rejects symlinked or out-of-root files, records source URL/license/verification date when supplied, computes a tree hash, records engine and main entry, and sets template_status exactly as locked in the conventions.
 
-- [ ] **Step 4: Implement LaTeX compilation and PDF QA**
+- [x] **Step 4: Implement LaTeX compilation and PDF QA**
 
 paper_production.py exposes produce_paper(project_root, iteration, content_path, environment_manifest_path, template_path=None, compiler=None). It assembles content only after Gate 3 and current validation, invokes the detected compiler without a shell (Tectonic first, otherwise latexmk/xelatex), captures logs, writes paper_manifest.json, and leaves failed output for audit. latex_qa.py counts pages using pdfinfo when available and a conservative PDF page-object fallback, checks section markers, unresolved references, empty/broken page output, body range markers, and total/body thresholds. It never pads, hides, or deletes pages to meet limits.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
     python3 -m unittest tests/test_latex_qa.py tests/test_paper_production.py -v
     git add skills/math-modeling-paper-production scripts/latex_qa.py scripts/paper_production.py tests/test_latex_qa.py tests/test_paper_production.py
@@ -768,7 +768,7 @@ The tests use a fake compiler executable in a temporary directory for determinis
 - Modify: skills/math-modeling-orchestrator/agents/openai.yaml
 - Create: tests/test_orchestrator_contract.py
 
-- [ ] **Step 1: Write failing routing and gate tests**
+- [x] **Step 1: Write failing routing and gate tests**
 
     def test_new_problem_must_enter_preflight_before_problem_analysis(self):
         text = ORCHESTRATOR.read_text(encoding="utf-8")
@@ -786,19 +786,19 @@ The tests use a fake compiler executable in a temporary directory for determinis
         for phrase in ("用途", "字段", "许可证", "用户确认"):
             self.assertIn(phrase, text)
 
-- [ ] **Step 2: Add a non-factual CUMCM pack**
+- [x] **Step 2: Add a non-factual CUMCM pack**
 
 cumcm.json declares competition: "CUMCM", language: "zh-CN", requires_official_verification: true, the three gate ids, paper page defaults, and an empty official_sources array. It does not assert a current year’s rules, submission URL, or license. The preflight report requires a user-provided or read-only verified official source before a final submission claim.
 
-- [ ] **Step 3: Update orchestrator routing instructions**
+- [x] **Step 3: Update orchestrator routing instructions**
 
 The orchestrator must read workflow, load/migrate v2 handoff, invoke preflight first, require the exact three gate records, route visualization based on figure claims, route paper-writing only after validation pass and Gate 3, and route paper-production only after paper content is complete. It must preserve per-question source versions and mark downstream artifacts stale before rerouting. It must explicitly pause for missing Python path, model-changing ambiguity, unapproved external data, template conflict, or page-gate failure.
 
-- [ ] **Step 4: Update the shared handoff contract and data stage**
+- [x] **Step 4: Update the shared handoff contract and data stage**
 
 Document v2 fields, gate artifacts, current/stale semantics, recommended_stage as a recommendation rather than permission, and no-forward routing on needs_revision. Add the external-data approval record shape (purpose, fields, source, license, risk, user_confirmation) and require it before any download.
 
-- [ ] **Step 5: Run tests and commit**
+- [x] **Step 5: Run tests and commit**
 
     python3 -m unittest tests/test_orchestrator_contract.py tests/test_repository_contract.py -v
     git add skills/math-modeling-orchestrator skills/math-modeling-problem-analysis/SKILL.md skills/math-modeling-data-analysis/SKILL.md tests/test_orchestrator_contract.py
@@ -815,11 +815,11 @@ Document v2 fields, gate artifacts, current/stale semantics, recommended_stage a
 - Create: tests/fixtures/cumcm-mini/scripts/q2.py
 - Create: tests/test_end_to_end_fixture.py
 
-- [ ] **Step 1: Create deterministic Chinese fixture inputs**
+- [x] **Step 1: Create deterministic Chinese fixture inputs**
 
 Use a short, original CUMCM-style prompt with two questions (one descriptive regression question and one constrained allocation question) and a small CSV whose columns, units, and provenance are stated in problem.txt. Mark the fixture as test data in every manifest. The scripts read the copied input path, set a seed, write finite JSON metrics with units, and intentionally contain no network or model API calls.
 
-- [ ] **Step 2: Write the failing end-to-end assertions**
+- [x] **Step 2: Write the failing end-to-end assertions**
 
 The test must call init_project(project, python_executable=Path(sys.executable).resolve(), input_dir=input_dir, template_path=None) explicitly and define the local helpers gate_status, cannot_route, figure_status, validation_status, paper_content_status, and paper_manifest by reading the public JSON artifacts. It then asserts this sequence:
 
@@ -837,11 +837,11 @@ The test must call init_project(project, python_executable=Path(sys.executable).
 
 Also assert that changing Q2 creates v002 while current.json["question_sources"]["Q1"] == "v001", changing input/data.csv marks Q2 run/figure/validation/paper stale, a failed validation cannot call paper production, and a fake compiler failure leaves logs and a non-ready status.
 
-- [ ] **Step 3: Implement only the fixture adapters needed by the test**
+- [x] **Step 3: Implement only the fixture adapters needed by the test**
 
 Use the public functions from Tasks 3–9; do not add fixture-specific shortcuts to production modules. Where the fallback template cannot be compiled on the host, use the fake compiler from tests/helpers/fake_compiler.py and retain a separate real-compiler smoke test guarded by tool detection.
 
-- [ ] **Step 4: Run the end-to-end test and commit**
+- [x] **Step 4: Run the end-to-end test and commit**
 
     python3 -m unittest tests/test_end_to_end_fixture.py -v
     git add tests/fixtures/cumcm-mini tests/test_end_to_end_fixture.py
@@ -860,26 +860,26 @@ Expected: the fixture proves gate blocking, Python execution, real-result figure
 - Modify: tests/test_bundle.py
 - Modify: tests/test_repository_contract.py
 
-- [ ] **Step 1: Add failing documentation/metadata assertions**
+- [x] **Step 1: Add failing documentation/metadata assertions**
 
 Assert the manifest description mentions Python, LaTeX, and staged verification; README includes --python, preflight, v001, figure QA, fallback status, and the update paths for drawing guidance/templates; architecture lists all nine routed stages and the read-only method library.
 
-- [ ] **Step 2: Update plugin metadata without introducing unsupported declarations**
+- [x] **Step 2: Update plugin metadata without introducing unsupported declarations**
 
 Bump the semantic version to 0.2.0, retain skills: "./skills/", update interface descriptions and the default orchestrator prompt, and do not add hooks, apps, MCP servers, credentials, or user-project paths to the manifest.
 
-- [ ] **Step 3: Write the maintainer update guide**
+- [x] **Step 3: Write the maintainer update guide**
 
 docs/development.md gives exact workflows for adding a drawing rule, paper template, or algorithm method: create a behavior fixture, add the resource under the owning Skill, record source/license/version/hash, update schema/workflow/validator/tests/docs, build and validate a bundle, and run the offline plus a real supplied-project smoke test. It explains when a schema version or competition pack version must change and how to keep old templates/iterations immutable.
 
-- [ ] **Step 4: Extend bundle tests and run source validation**
+- [x] **Step 4: Extend bundle tests and run source validation**
 
 Ensure new assets are regular files, fixture/user state is not bundled, fallback templates contain no credentials, and the builder still rejects symlinks, special files, environment files, and private-key suffixes. Run:
 
     python3 scripts/validate_suite.py
     python3 -m unittest discover -s tests -p 'test_*.py' -v
 
-- [ ] **Step 5: Commit documentation and metadata**
+- [x] **Step 5: Commit documentation and metadata**
 
     git add .codex-plugin/plugin.json README.md docs/architecture.md docs/development.md CHANGELOG.md tests/test_bundle.py tests/test_repository_contract.py
     git commit -m "docs: document complete skill operations and updates"
@@ -890,7 +890,7 @@ Ensure new assets are regular files, fixture/user state is not bundled, fallback
 - Modify: docs/superpowers/plans/2026-08-27-math-modeling-complete-skill-implementation.md (checkboxes only)
 - Create outside repository: temporary bundle and QA reports
 
-- [ ] **Step 1: Run all deterministic checks**
+- [x] **Step 1: Run all deterministic checks**
 
     python3 scripts/validate_suite.py
     python3 -m unittest discover -s tests -p 'test_*.py' -v
@@ -901,19 +901,19 @@ Ensure new assets are regular files, fixture/user state is not bundled, fallback
 
 Expected: source validation passes, all tests pass, bundle validation passes, and installer dry-run prints commands without changing Codex configuration.
 
-- [ ] **Step 2: Run optional official validators when present**
+- [x] **Step 2: Run optional official validators when present**
 
 Locate the installed Codex quick_validate.py and validate_plugin.py; run them against the source and generated bundle. If either validator is unavailable, record that fact in the QA report rather than substituting an unsupported result. Do not run codex plugin add unless the user explicitly requests installation.
 
-- [ ] **Step 3: Inspect the bundle and generated fixture artifacts**
+- [x] **Step 3: Inspect the bundle and generated fixture artifacts**
 
 Confirm the bundle contains all required Skill metadata, schemas, references, templates, and scripts, but no iterations/, virtual environment, cache, credential filename, or test-generated result. Confirm the fixture paper has the Chinese sections and that fallback status blocks submission-ready.
 
-- [ ] **Step 4: Update the plan checkboxes and changelog**
+- [x] **Step 4: Update the plan checkboxes and changelog**
 
 Mark only observed passing steps complete, add the exact test count and tool availability to CHANGELOG.md, and record any user-supplied Python/LaTeX paths only in the external QA report, never in the repository.
 
-- [ ] **Step 5: Request code review before integration**
+- [x] **Step 5: Request code review before integration**
 
 Invoke superpowers:requesting-code-review with the implementation commits, test output, bundle path, and any unresolved warnings. Do not claim the Skill is complete until review findings are resolved and the verification commands are rerun.
 

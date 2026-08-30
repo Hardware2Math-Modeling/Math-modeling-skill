@@ -1,0 +1,33 @@
+\documentclass[UTF8,11pt,a4paper]{ctexart}
+\usepackage[a4paper,margin=2.5cm]{geometry}
+\usepackage{caption}
+\usepackage{booktabs}
+\usepackage{amsmath,amssymb}
+\usepackage{xcolor}
+\usepackage[hidelinks]{hyperref}
+
+\definecolor{FallbackGray}{HTML}{4A4A4A}
+\captionsetup{font=small,labelfont=bf}
+\setlength{\parindent}{2em}
+\setlength{\parskip}{0pt}
+
+\title{数学建模论文候选稿}
+\author{\textcolor{FallbackGray}{通用 fallback（非官方模板，不可直接提交）}}
+\date{}
+
+\begin{document}
+\maketitle
+\begin{center}
+  \color{FallbackGray}\small
+  本 PDF 仅用于编译与审阅；提交前必须替换为当届已核验官方或用户模板。
+\end{center}
+
+\input{paper-frontmatter.tex}
+
+\input{paper-body.tex}
+
+% paper-appendices.tex supplies Appendix A--D headings:
+% references; code; AI use/human review; supplemental derivations and figures.
+\input{paper-appendices.tex}
+
+\end{document}
