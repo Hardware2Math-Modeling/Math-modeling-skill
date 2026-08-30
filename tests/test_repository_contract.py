@@ -24,7 +24,7 @@ HANDOFF_PATH = WORKFLOW_PATH.parent / "handoff-contract.md"
 ORCHESTRATOR_PATH = WORKFLOW_PATH.parents[1] / "SKILL.md"
 PAPER_WRITING_PATH = ROOT / "skills" / "math-modeling-paper-writing" / "SKILL.md"
 MANIFEST_PATH = ROOT / ".codex-plugin" / "plugin.json"
-README_PATH = ROOT / "README.md"
+OPERATIONS_PATH = ROOT / "docs" / "operations.md"
 ARCHITECTURE_PATH = ROOT / "docs" / "architecture.md"
 DEVELOPMENT_PATH = ROOT / "docs" / "development.md"
 CHANGELOG_PATH = ROOT / "CHANGELOG.md"
@@ -62,8 +62,9 @@ class RepositoryContractTests(unittest.TestCase):
         self.assertIn("method library", interface_text)
         self.assertIn("$math-modeling-orchestrator", interface_text)
 
-    def test_readme_documents_the_operator_contract(self) -> None:
-        readme = README_PATH.read_text(encoding="utf-8")
+    def test_operations_guide_documents_the_operator_contract(self) -> None:
+        self.assertTrue(OPERATIONS_PATH.is_file(), f"missing {OPERATIONS_PATH}")
+        operations = OPERATIONS_PATH.read_text(encoding="utf-8")
         for term in (
             "--python",
             "preflight",
@@ -75,7 +76,7 @@ class RepositoryContractTests(unittest.TestCase):
             "skills/math-modeling-method-library/references/",
         ):
             with self.subTest(term=term):
-                self.assertIn(term, readme)
+                self.assertIn(term, operations)
 
     def test_architecture_matches_the_routed_stage_and_support_boundaries(self) -> None:
         architecture = ARCHITECTURE_PATH.read_text(encoding="utf-8")
