@@ -40,9 +40,13 @@ def gate_status(project: Path, gate_id: str) -> object:
 
 
 def cannot_route(project: Path, stage: str) -> bool:
-    if stage != "model-construction":
+    gate_id = {
+        "model-construction": "gate1",
+        "model-solving": "gate2",
+    }.get(stage)
+    if gate_id is None:
         return False
-    return gate_status(project, "gate2") != "confirmed"
+    return gate_status(project, gate_id) != "confirmed"
 
 
 def figure_status(project: Path, figure_id: str) -> object:
@@ -73,30 +77,104 @@ def _compiler_on_host() -> tuple[str, Path] | None:
     return None
 
 
-def _png(path: Path, width: int = 1200, height: int = 800) -> None:
+def _png(
+    path: Path,
+    series: list[dict[str, object]],
+    width: int = 1200,
+    height: int = 800,
+) -> None:
     def chunk(kind: bytes, payload: bytes) -> bytes:
         return struct.pack(">I", len(payload)) + kind + payload + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+
+    pixels = bytearray(b"\xff" * (width * height * 3))
+
+    def put(x: int, y: int, color: tuple[int, int, int]) -> None:
+        if 0 <= x < width and 0 <= y < height:
+            offset = (y * width + x) * 3
+            pixels[offset:offset + 3] = bytes(color)
+
+    def line(
+        start: tuple[int, int],
+        end: tuple[int, int],
+        color: tuple[int, int, int],
+    ) -> None:
+        x0, y0 = start
+        x1, y1 = end
+        dx, sx = abs(x1 - x0), 1 if x0 < x1 else -1
+        dy, sy = -abs(y1 - y0), 1 if y0 < y1 else -1
+        error = dx + dy
+        while True:
+            put(x0, y0, color)
+            if (x0, y0) == (x1, y1):
+                break
+            doubled = 2 * error
+            if doubled >= dy:
+                error += dy
+                x0 += sx
+            if doubled <= dx:
+                error += dx
+                y0 += sy
+
+    months = [float(point["month"]) for point in series]
+    actual = [float(point["actual_items"]) for point in series]
+    fitted = [float(point["fitted_items"]) for point in series]
+    x_min, x_max = min(months), max(months)
+    y_min, y_max = min([*actual, *fitted]), max([*actual, *fitted])
+    left, right, top, bottom = 100, width - 100, 80, height - 80
+
+    def coordinate(month: float, value: float) -> tuple[int, int]:
+        x = left + round((month - x_min) * (right - left) / (x_max - x_min))
+        y = bottom - round((value - y_min) * (bottom - top) / (y_max - y_min))
+        return x, y
+
+    line((left, top), (left, bottom), (64, 64, 64))
+    line((left, bottom), (right, bottom), (64, 64, 64))
+    fitted_points = [
+        coordinate(month, value) for month, value in zip(months, fitted)
+    ]
+    for start, end in zip(fitted_points, fitted_points[1:]):
+        line(start, end, (0, 0, 0))
+    for month, value in zip(months, actual):
+        x, y = coordinate(month, value)
+        for offset_y in range(-3, 4):
+            for offset_x in range(-3, 4):
+                put(x + offset_x, y + offset_y, (128, 128, 128))
+
     ppm = round(300 / 0.0254)
-    rows = b"".join(b"\x00" + b"\x80\x80\x80" * width for _ in range(height))
+    rows = b"".join(
+        b"\x00" + bytes(pixels[row * width * 3:(row + 1) * width * 3])
+        for row in range(height)
+    )
     path.write_bytes(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)) + chunk(b"pHYs", struct.pack(">IIB", ppm, ppm, 1)) + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
 
 
-def _result(question: str, metric_path: str, metric_hash: str, run_id: str) -> dict[str, object]:
+def _result(
+    question: str,
+    metric_name: str,
+    metric: dict[str, object],
+    output_path: str,
+    output_hash: str,
+    run_id: str,
+    run_manifest_path: str,
+    run_manifest_hash: str,
+) -> dict[str, object]:
     suffix = question.lower()
+    value = metric["value"]
+    unit = metric["unit"]
     return {
         "question_id": question,
         "model_id": f"model-{suffix}-v1",
         "assumptions": ["fixture/test-data：测试数据假设成立。"],
-        "baseline": {"model_id": f"baseline-{suffix}", "metric": "score", "value": 0.5, "unit": "dimensionless"},
+        "baseline": {"model_id": f"baseline-{suffix}", "metric": metric_name, "value": value, "unit": unit},
         "parameters": {"seed": {"value": 1729, "unit": "dimensionless"}},
-        "metrics": {"score": {"value": 0.75, "unit": "dimensionless", "source_path": metric_path, "source_hash": metric_hash, "finite": True}},
-        "units": {"score": "dimensionless"},
-        "run_manifest": {"run_id": run_id, "status": "success", "seed": 1729},
+        "metrics": {metric_name: {"value": value, "unit": unit, "source_path": output_path, "source_hash": output_hash, "finite": True}},
+        "units": {metric_name: unit},
+        "run_manifest": {"run_id": run_id, "status": "success", "seed": 1729, "path": run_manifest_path, "sha256": run_manifest_hash},
         "validation_plan": {"validation_cycle_id": f"validation-{suffix}-001", "threshold": 0.5, "split": "holdout", "scope": f"{question} test observations", "seed": 1729, "method": "blocked holdout"},
         "validation_history": [],
         "validation_manifest": {"validation_cycle_id": f"validation-{suffix}-001", "status": "pass"},
         "figure_manifests": [],
-        "claims": [{"claim_id": f"claim-{suffix}-01", "statement": "冻结结果的得分为 0.75。", "metric": "score", "source_path": metric_path, "source_hash": metric_hash}],
+        "claims": [{"claim_id": f"claim-{suffix}-01", "statement": f"{question} 运行结果的 {metric_name} 为 {format(value, '.12g')} {unit}。", "metric": metric_name, "source_path": output_path, "source_hash": output_hash}],
         "freeze_status": "confirmed",
     }
 
@@ -191,7 +269,10 @@ class EndToEndFixtureTests(unittest.TestCase):
         pa = self.iteration / "state/problem-analysis.json"; pa.write_text('{"fixture":true}\n')
         ms = self.iteration / "state/model-specification.json"; ms.write_text('{"fixture":true}\n')
         self._gate("gate1", "problem-analysis", pa, "fixture-g1")
+        self.assertFalse(cannot_route(self.project, "model-construction"))
+        self.assertTrue(cannot_route(self.project, "model-solving"))
         self._gate("gate2", "model-specification", ms, "fixture-g2")
+        self.assertFalse(cannot_route(self.project, "model-solving"))
         for q in ("q1", "q2"):
             out = self.iteration / f"results/{q}-run"; out.mkdir()
             script = FIXTURE / "scripts" / f"{q}.py"
@@ -203,35 +284,186 @@ class EndToEndFixtureTests(unittest.TestCase):
                 self.assertIsInstance(metric["value"], (int, float))
                 self.assertTrue(math.isfinite(metric["value"]))
                 self.assertIn("unit", metric)
-            metric = self.iteration / f"results/{q}-metric.json"; metric.write_text('{"score":0.75,"unit":"dimensionless"}\n')
-            result = self.iteration / f"results/{q}-result.json"; result.write_text(json.dumps(_result(q.upper(), f"results/{q}-metric.json", sha256_file(metric), f"run-{q}-001"), sort_keys=True, ensure_ascii=False) + "\n")
+            metric_name = {"q1": "r_squared", "q2": "total_cost"}[q]
+            runner_output_path = f"results/{q}-run/output.json"
+            runner_output_hash = sha256_file(out / "output.json")
+            run_manifest = out / "run_manifest.json"
+            result = self.iteration / f"results/{q}-result.json"
+            result.write_text(
+                json.dumps(
+                    _result(
+                        q.upper(),
+                        metric_name,
+                        output["metrics"][metric_name],
+                        runner_output_path,
+                        runner_output_hash,
+                        f"run-{q}-001",
+                        f"results/{q}-run/run_manifest.json",
+                        sha256_file(run_manifest),
+                    ),
+                    sort_keys=True,
+                    ensure_ascii=False,
+                )
+                + "\n",
+                encoding="utf-8",
+            )
             result_payload = json.loads(result.read_text(encoding="utf-8"))
             self.assertEqual([], validate_result_payload(result_payload))
             self.assertIn("fixture/test-data", result_payload["assumptions"][0])
-        figdir = self.iteration / "figures"; _png(figdir / "q1-fit.png")
-        fm = self.iteration / "manifests/q1-fit.json"
+            runner_metric = output["metrics"][metric_name]
+            self.assertEqual([metric_name], list(result_payload["metrics"]))
+            result_metric = result_payload["metrics"][metric_name]
+            self.assertEqual(runner_metric["value"], result_metric["value"])
+            self.assertEqual(runner_metric["unit"], result_metric["unit"])
+            self.assertEqual(runner_output_path, result_metric["source_path"])
+            self.assertEqual(runner_output_hash, result_metric["source_hash"])
+            result_claim = result_payload["claims"][0]
+            self.assertEqual(metric_name, result_claim["metric"])
+            self.assertEqual(runner_output_path, result_claim["source_path"])
+            self.assertEqual(runner_output_hash, result_claim["source_hash"])
         q1_output = self.iteration / "results/q1-run/output.json"
         q1_payload = json.loads(q1_output.read_text(encoding="utf-8"))
-        fm.write_text(json.dumps({"schema_version":"1","figure_id":"q1-fit","role":"evidence","question_id":"Q1","claim_id":"claim-q1-01","claim_type":"data","exploratory_draft":False,"sources":[{"path":"results/q1-run/output.json","sha256":sha256_file(q1_output)}],"outputs":[{"path":"figures/q1-fit.png","format":"png","width_px":1200,"height_px":800,"dpi_x":300,"dpi_y":300}],"axes":[{"id":"x","label":"month","unit":"month"},{"id":"y","label":"demand","unit":"items"}],"legend":{"present":False,"reason":"single series"},"caption":f"Q1 fit from {len(q1_payload['series'])} regression points; fixture/test-data","paper_reference":"Figure 1","paper_width_mm":85,"grayscale_status":"pass","colorblind_status":"pass","render_status":"pass","status":"draft"}, ensure_ascii=False))
+        figdir = self.iteration / "figures"
+        _png(figdir / "q1-fit.png", q1_payload["series"])
+        fm = self.iteration / "manifests/q1-fit.json"
+        fm.write_text(json.dumps({"schema_version":"1","figure_id":"q1-fit","role":"evidence","question_id":"Q1","claim_id":"claim-q1-01","claim_type":"data","exploratory_draft":False,"sources":[{"path":"results/q1-run/output.json","sha256":sha256_file(q1_output)}],"outputs":[{"path":"figures/q1-fit.png","format":"png","width_px":1200,"height_px":800,"dpi_x":300,"dpi_y":300}],"axes":[{"id":"x","label":"month","unit":"month"},{"id":"y","label":"demand","unit":"items"}],"legend":{"present":True,"labels":["actual items","fitted items"]},"caption":f"Q1 actual and fitted demand from {len(q1_payload['series'])} regression points; fixture/test-data","paper_reference":"Figure 1","paper_width_mm":85,"grayscale_status":"pass","colorblind_status":"pass","render_status":"pass","status":"draft"}, ensure_ascii=False))
         self.assertEqual("verified", refresh_figure_status(fm, project_root=self.iteration)["status"])
         self.assertEqual("verified", figure_status(self.project, "q1-fit"))
+        q1_result_path = self.iteration / "results/q1-result.json"
+        q1_result_with_figure = json.loads(
+            q1_result_path.read_text(encoding="utf-8")
+        )
+        q1_result_with_figure["figure_manifests"] = [{
+            "figure_id": "q1-fit",
+            "status": "verified",
+            "manifest_path": "manifests/q1-fit.json",
+            "manifest_hash": sha256_file(fm),
+        }]
+        q1_result_path.write_text(
+            json.dumps(q1_result_with_figure, sort_keys=True, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        png_bytes = (figdir / "q1-fit.png").read_bytes()
+        idat_offset = png_bytes.index(b"IDAT")
+        idat_length = struct.unpack(">I", png_bytes[idat_offset - 4:idat_offset])[0]
+        raw_rows = zlib.decompress(
+            png_bytes[idat_offset + 4:idat_offset + 4 + idat_length]
+        )
+        row_width = 1200 * 3
+        pixel_values: set[bytes] = set()
+        for row_index in range(800):
+            row_start = row_index * (row_width + 1) + 1
+            for column in range(0, row_width, 3):
+                pixel_values.add(raw_rows[row_start + column:row_start + column + 3])
+                if len(pixel_values) > 1:
+                    break
+            if len(pixel_values) > 1:
+                break
+        self.assertGreater(len(pixel_values), 1, "Q1 PNG must contain data-derived pixels")
+        q1_result = self.iteration / "results/q1-result.json"
+        q1_result_payload = json.loads(q1_result.read_text(encoding="utf-8"))
+        self.assertEqual(
+            [{
+                "figure_id": "q1-fit",
+                "status": "verified",
+                "manifest_path": "manifests/q1-fit.json",
+                "manifest_hash": sha256_file(fm),
+            }],
+            q1_result_payload["figure_manifests"],
+        )
+        self.assertEqual([], validate_result_payload(q1_result_payload))
         (self.iteration / "state/handoff.json").write_text(json.dumps({"state":{"validation_status":"pass","invalidated_stages":[]},"artifacts":[]}) + "\n")
         vm = self.iteration / "manifests/validation.json"; vm.write_text('{"validation_cycle_id":"v1","status":"pass","fixture_label":"fixture/test-data"}\n')
-        rc = self.iteration / "manifests/result-contract.json"; rc.write_text('{"status":"confirmed","fixture_label":"fixture/test-data"}\n')
-        rm = self.iteration / "manifests/run-manifest.json"; rm.write_text('{"status":"success","fixture_label":"fixture/test-data"}\n')
         self.assertEqual("fixture/test-data", json.loads(vm.read_text())["fixture_label"])
         from handoff_schema import user_event_challenge_sha256
-        scope = [{"path": p.relative_to(self.project).as_posix(), "kind": k, "sha256": sha256_file(p)} for p, k in ((rc, "result-contract"), (rm, "run-manifest"), (vm, "validation-manifest"))]
+        scope = [
+            {
+                "path": path.relative_to(self.project).as_posix(),
+                "kind": kind,
+                "sha256": sha256_file(path),
+            }
+            for path, kind in (
+                (self.iteration / "results/q1-result.json", "result-contract"),
+                (self.iteration / "results/q2-result.json", "result-contract"),
+                (self.iteration / "results/q1-run/run_manifest.json", "run-manifest"),
+                (self.iteration / "results/q2-run/run_manifest.json", "run-manifest"),
+                (vm, "validation-manifest"),
+                (fm, "figure-manifest"),
+            )
+        ]
         ordered = sorted(scope, key=lambda x: (x["kind"], x["path"]))
         challenge = user_event_challenge_sha256("gate-confirmation", {"schema_version":"2", "gate_id":"gate3", "artifact_scope":ordered})
         receipt = {"schema_version":"2","provenance_type":"trusted_user_event","provider":"fixture-host-boundary","event_id":"fixture-g3","event_type":"gate-confirmation","actor_id":"tester","occurred_at":"2026-08-27T00:00:00Z","challenge_sha256":challenge}
         cap = _install_host_capability(verify_user_event=_Verifier(receipt).verify_user_event, verify_official_source=lambda **_:False, registration_token=_HOST_REGISTRATION_TOKEN)
         record_gate(self.project, gate_id="gate3", status="confirmed", confirmer="tester", artifact_hashes=[e["sha256"] for e in ordered], artifact_scope=scope, note="fixture review", confirmation_event_id="fixture-g3", host_capability=cap)
+        expected_gate3_scope = sorted(
+            [
+                {
+                    "path": path.relative_to(self.project).as_posix(),
+                    "kind": kind,
+                    "sha256": sha256_file(path),
+                }
+                for path, kind in (
+                    (self.iteration / "results/q1-result.json", "result-contract"),
+                    (self.iteration / "results/q2-result.json", "result-contract"),
+                    (self.iteration / "results/q1-run/run_manifest.json", "run-manifest"),
+                    (self.iteration / "results/q2-run/run_manifest.json", "run-manifest"),
+                    (vm, "validation-manifest"),
+                    (fm, "figure-manifest"),
+                )
+            ],
+            key=lambda entry: (entry["kind"], entry["path"]),
+        )
+        gate_report = json.loads(
+            (self.project / "qa/gates.json").read_text(encoding="utf-8")
+        )
+        self.assertEqual(expected_gate3_scope, gate_report["records"][-1]["artifact_scope"])
         content = {"schema_version":"1","language":"zh-CN","requirement_manifests":[],"abstract":{"intro_sentences":["测试问题。","本文完成验证。"],"question_paragraphs":[{"question_id":"Q1","leading_summary":"回归分析。","modeling_steps":"建立模型。","answer":"结果有效。"},{"question_id":"Q2","leading_summary":"资源分配。","modeling_steps":"建立约束。","answer":"成本最小。"}]},"keywords":["数学建模"],"sections":{"1":{"title":"问题背景与重述","subsections":{"1.1":{"title":"问题背景","content":"测试。"},"1.2":{"title":"问题重述","content":"测试。"}}},"2":{"title":"问题分析","content":"测试。"},"3":{"title":"模型假设","content":"测试。"},"4":{"title":"符号说明","content":"测试。"},"5":{"title":"模型的建立与求解","questions":[{"question_id":"Q1","title":"第一问","subsections":{"5.1.1":{"title":"建模","content":"测试。"},"5.1.2":{"title":"计算","content":"测试。"}}},{"question_id":"Q2","title":"第二问","subsections":{"5.2.1":{"title":"建模","content":"测试。"},"5.2.2":{"title":"计算","content":"测试。"}}}]},"6":{"title":"模型检验","content":"测试。"},"7":{"title":"模型评价与推广/改进","content":"测试。"},"8":{"title":"结论","content":"测试。"}},"symbols":[{"symbol":"x","description":"变量","unit":"无量纲"}],"claims":[{"question_id":"Q1","claim_id":"claim-q1-01","statement":"结果。","source_path":"results/q1-result.json","source_hash":sha256_file(self.iteration/'results/q1-result.json'),"important":True},{"question_id":"Q2","claim_id":"claim-q2-01","statement":"结果。","source_path":"results/q2-result.json","source_hash":sha256_file(self.iteration/'results/q2-result.json'),"important":True}],"figure_references":[],"table_references":[],"references":[],"code_appendix":[],"ai_use_disclosure":[],"human_review_records":[],"supplemental_appendix":[]}
         content["keywords"].append("fixture/test-data")
         self.assertIn("fixture/test-data", content["keywords"])
-        content["claims"][0]["statement"] = "冻结结果的得分为 0.75。"
-        content["claims"][1]["statement"] = "冻结结果的得分为 0.75。"
+        for index, question in enumerate(("q1", "q2")):
+            result_payload = json.loads(
+                (self.iteration / f"results/{question}-result.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            content["claims"][index]["statement"] = result_payload["claims"][0][
+                "statement"
+            ]
+        content["figure_references"] = [{
+            "figure_id": "q1-fit",
+            "manifest_path": "manifests/q1-fit.json",
+            "manifest_hash": sha256_file(fm),
+        }]
+        for index, (question, metric_name) in enumerate(
+            (("q1", "r_squared"), ("q2", "total_cost"))
+        ):
+            result_payload = json.loads(
+                (self.iteration / f"results/{question}-result.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            runner_payload = json.loads(
+                (self.iteration / f"results/{question}-run/output.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            paper_statement = content["claims"][index]["statement"]
+            self.assertEqual(result_payload["claims"][0]["statement"], paper_statement)
+            self.assertIn(metric_name, paper_statement)
+            self.assertIn(
+                format(runner_payload["metrics"][metric_name]["value"], ".12g"),
+                paper_statement,
+            )
+            self.assertIn(runner_payload["metrics"][metric_name]["unit"], paper_statement)
+        self.assertEqual(
+            [{
+                "figure_id": "q1-fit",
+                "manifest_path": "manifests/q1-fit.json",
+                "manifest_hash": sha256_file(fm),
+            }],
+            content["figure_references"],
+        )
         self.assertEqual([], validate_paper_content(content, evidence_root=self.iteration))
         freeze_content(content, output_path=self.iteration/'paper/frozen-content.json', evidence_root=self.iteration)
         self.assertEqual("complete", paper_content_status(self.project))
