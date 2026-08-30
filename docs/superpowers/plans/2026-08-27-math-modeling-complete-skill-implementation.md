@@ -913,7 +913,7 @@ Confirm the bundle contains all required Skill metadata, schemas, references, te
 
 Mark only observed passing steps complete, add the exact test count and tool availability to CHANGELOG.md, and record any user-supplied Python/LaTeX paths only in the external QA report, never in the repository.
 
-- [ ] **Step 5: Request code review before integration**
+- [x] **Step 5: Request code review before integration**
 
 Invoke superpowers:requesting-code-review with the implementation commits, test output, bundle path, and any unresolved warnings. Do not claim the Skill is complete until review findings are resolved and the verification commands are rerun.
 
