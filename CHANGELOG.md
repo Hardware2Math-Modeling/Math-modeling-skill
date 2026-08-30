@@ -19,3 +19,9 @@
 - The built-in paper template is always marked `fallback_non_submission`; it can compile for review but cannot become `submission_ready`.
 - Validation and bundle commands remain offline and do not install Python packages, LaTeX, solver runtimes, MCP servers, or credentials. User projects must provide an absolute Python path and, when paper production is requested, suitable LaTeX/renderer tools.
 - Older immutable iterations, templates, manifests, and evidence remain readable audit records; result-affecting changes create a new iteration and propagate stale status instead of overwriting history.
+
+### Release verification
+
+- Fresh deterministic verification passed suite validation, the 30-entry method catalog check, 458 of 458 unit and contract tests with zero skips, bundle build and validation, and the no-write local installer dry-run.
+- The installed official `validate_plugin.py` and `quick_validate.py` files were present but unavailable under the release interpreter because the `yaml`/PyYAML dependency was missing; source and bundle invocations exited 1, and no dependency was installed.
+- LaTeX doctor reported an existing usable TeX Live 2026 environment; the latexmk 4.88 smoke test passed. Bundled Tectonic 0.16.9 was detected, but its managed-environment smoke test failed with `Operation not permitted`.
