@@ -23,6 +23,11 @@ WORKFLOW_PATH = (
 HANDOFF_PATH = WORKFLOW_PATH.parent / "handoff-contract.md"
 ORCHESTRATOR_PATH = WORKFLOW_PATH.parents[1] / "SKILL.md"
 PAPER_WRITING_PATH = ROOT / "skills" / "math-modeling-paper-writing" / "SKILL.md"
+MANIFEST_PATH = ROOT / ".codex-plugin" / "plugin.json"
+README_PATH = ROOT / "README.md"
+ARCHITECTURE_PATH = ROOT / "docs" / "architecture.md"
+DEVELOPMENT_PATH = ROOT / "docs" / "development.md"
+CHANGELOG_PATH = ROOT / "CHANGELOG.md"
 
 
 class RepositoryContractTests(unittest.TestCase):
@@ -32,6 +37,99 @@ class RepositoryContractTests(unittest.TestCase):
 
     def test_repository_suite_is_valid(self) -> None:
         self.assertEqual([], validate_suite(ROOT))
+
+    def test_release_manifest_describes_the_complete_workflow(self) -> None:
+        manifest = json.loads(MANIFEST_PATH.read_text(encoding="utf-8"))
+        self.assertEqual("0.2.0", manifest["version"])
+        self.assertEqual("./skills/", manifest["skills"])
+
+        description = manifest["description"].casefold()
+        for capability in ("python", "latex", "staged verification"):
+            with self.subTest(capability=capability):
+                self.assertIn(capability, description)
+
+        interface = manifest["interface"]
+        interface_text = " ".join(
+            [
+                interface["shortDescription"],
+                interface["longDescription"],
+                *interface["defaultPrompt"],
+            ]
+        ).casefold()
+        for stage in self.load_workflow()["stages"]:
+            with self.subTest(stage=stage["id"]):
+                self.assertIn(stage["id"], interface_text)
+        self.assertIn("method library", interface_text)
+        self.assertIn("$math-modeling-orchestrator", interface_text)
+
+    def test_readme_documents_the_operator_contract(self) -> None:
+        readme = README_PATH.read_text(encoding="utf-8")
+        for term in (
+            "--python",
+            "preflight",
+            "v001",
+            "figure QA",
+            "fallback_non_submission",
+            "skills/math-modeling-visualization/references/",
+            "skills/math-modeling-paper-production/assets/",
+            "skills/math-modeling-method-library/references/",
+        ):
+            with self.subTest(term=term):
+                self.assertIn(term, readme)
+
+    def test_architecture_matches_the_routed_stage_and_support_boundaries(self) -> None:
+        architecture = ARCHITECTURE_PATH.read_text(encoding="utf-8")
+        positions = []
+        for stage in self.load_workflow()["stages"]:
+            marker = f"| `{stage['id']}` |"
+            position = architecture.find(marker)
+            with self.subTest(stage=stage["id"]):
+                self.assertNotEqual(-1, position, f"missing routed stage row: {marker}")
+            if position >= 0:
+                positions.append(position)
+        self.assertEqual(sorted(positions), positions)
+        self.assertIn("`math-modeling-method-library`", architecture)
+        self.assertRegex(architecture.casefold(), r"method library[^\n]*read-only|read-only[^\n]*method library")
+
+    def test_maintainer_guide_covers_resource_update_and_versioning_contracts(self) -> None:
+        self.assertTrue(DEVELOPMENT_PATH.is_file(), f"missing {DEVELOPMENT_PATH}")
+        development = DEVELOPMENT_PATH.read_text(encoding="utf-8")
+        for heading in (
+            "Update a drawing rule",
+            "Update a paper template",
+            "Update an algorithm method",
+        ):
+            with self.subTest(heading=heading):
+                self.assertIn(heading, development)
+        for term in (
+            "behavior fixture",
+            "source",
+            "license",
+            "version",
+            "SHA-256",
+            "schema",
+            "workflow",
+            "validator",
+            "python3 scripts/build_bundle.py",
+            "python3 scripts/validate_bundle.py",
+            "offline",
+            "supplied project",
+            "schema version",
+            "competition pack version",
+            "immutable",
+        ):
+            with self.subTest(term=term):
+                self.assertIn(term, development)
+
+    def test_changelog_records_release_migration_and_compatibility_facts(self) -> None:
+        self.assertTrue(CHANGELOG_PATH.is_file(), f"missing {CHANGELOG_PATH}")
+        changelog = CHANGELOG_PATH.read_text(encoding="utf-8")
+        self.assertIn("## [0.2.0]", changelog)
+        self.assertIn("schema version 2", changelog)
+        self.assertIn("schema version 1", changelog)
+        self.assertIn("fallback_non_submission", changelog)
+        self.assertIn("Python", changelog)
+        self.assertIn("LaTeX", changelog)
 
     def test_workflow_registers_each_stage_once_in_order(self) -> None:
         workflow = self.load_workflow()

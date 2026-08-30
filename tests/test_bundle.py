@@ -30,6 +30,57 @@ def run_git(root: Path, *args: str) -> None:
 
 
 class BundleTests(unittest.TestCase):
+    def test_new_skill_assets_are_regular_and_project_state_is_not_bundled(self) -> None:
+        asset_paths = (
+            ROOT / "skills/math-modeling-visualization/assets/styles/modeling.mplstyle",
+            ROOT / "skills/math-modeling-paper-production/assets/fallback-zh/main.tex",
+            ROOT / "skills/math-modeling-method-library/assets/fixtures/method-smoke.json",
+        )
+        for asset in asset_paths:
+            with self.subTest(asset=asset):
+                self.assertTrue(asset.is_file())
+                self.assertFalse(asset.is_symlink())
+
+        with tempfile.TemporaryDirectory() as directory:
+            base = Path(directory)
+            source = base / "source"
+            output = base / "bundle"
+            source.mkdir()
+            make_valid_suite(source)
+            run_git(source, "init", "--quiet")
+            (source / ".gitignore").write_text(
+                "iterations/\nuser-project/\npytest-results.json\n", encoding="utf-8"
+            )
+            run_git(source, "add", ".gitignore")
+            (source / "iterations/v001/state").mkdir(parents=True)
+            (source / "iterations/v001/state/handoff.json").write_text(
+                "test fixture state\n", encoding="utf-8"
+            )
+            (source / "user-project/results").mkdir(parents=True)
+            (source / "user-project/results/q1.json").write_text(
+                "user result\n", encoding="utf-8"
+            )
+            (source / "pytest-results.json").write_text(
+                "generated test output\n", encoding="utf-8"
+            )
+
+            plugin_root = build_bundle(source, output)
+
+            self.assertFalse((plugin_root / "iterations").exists())
+            self.assertFalse((plugin_root / "user-project").exists())
+            self.assertFalse((plugin_root / "pytest-results.json").exists())
+
+    def test_fallback_templates_contain_no_credential_material(self) -> None:
+        fallback = ROOT / "skills/math-modeling-paper-production/assets/fallback-zh"
+        files = sorted(path for path in fallback.rglob("*") if path.is_file())
+        self.assertTrue(files)
+        for path in files:
+            with self.subTest(path=path):
+                self.assertFalse(path.is_symlink())
+                text = path.read_text(encoding="utf-8").casefold()
+                for marker in ("api_key", "access_token", "private_key", "password="):
+                    self.assertNotIn(marker, text)
+
     def test_builds_valid_marketplace_bundle(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             base = Path(directory)
@@ -550,6 +601,16 @@ class BundleTests(unittest.TestCase):
                     "plugins/math-modeling-suite/unsafe-node",
                     errors,
                 )
+
+            for suffix in (".pem", ".key"):
+                private_key = output / "plugins" / "math-modeling-suite" / f"private{suffix}"
+                private_key.write_text("not a real key\n", encoding="utf-8")
+                errors = validate_bundle(output)
+                self.assertIn(
+                    f"bundle contains sensitive file: plugins/math-modeling-suite/private{suffix}",
+                    errors,
+                )
+                private_key.unlink()
 
             unreadable = output / "plugins" / "math-modeling-suite" / "unreadable"
             unreadable.mkdir()
