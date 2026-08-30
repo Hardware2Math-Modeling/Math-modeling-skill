@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
 import shutil
 import struct
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -19,30 +21,56 @@ from figure_qa import refresh_figure_status
 from manifest import sha256_file
 from paper_content import freeze_content, validate_paper_content
 from paper_production import produce_paper
-from project_state import create_iteration, init_project, load_current, mark_stale, record_gate
+from result_contract import validate_result_payload
+from project_state import (
+    create_iteration,
+    init_project,
+    load_current,
+    mark_stale,
+    record_gate,
+)
 from python_runner import run_python
 from test_latex_qa import write_text_pdf
-from test_paper_content import valid_content
 
 FIXTURE = ROOT / "tests/fixtures/cumcm-mini"
 
+
 def gate_status(project: Path, gate_id: str) -> object:
-    return json.loads((project / "current.json").read_text())["gates"][gate_id]
+    return json.loads((project / "current.json").read_text(encoding="utf-8"))["gates"][gate_id]
+
 
 def cannot_route(project: Path, stage: str) -> bool:
-    return gate_status(project, "gate2") != "confirmed" if stage == "model-construction" else False
+    if stage != "model-construction":
+        return False
+    return gate_status(project, "gate2") != "confirmed"
+
 
 def figure_status(project: Path, figure_id: str) -> object:
-    return json.loads((project / f"iterations/v001/manifests/{figure_id}.json").read_text())["status"]
+    path = project / f"iterations/v001/manifests/{figure_id}.json"
+    return json.loads(path.read_text(encoding="utf-8"))["status"]
+
 
 def validation_status(project: Path) -> object:
-    return json.loads((project / "iterations/v001/state/handoff.json").read_text())["state"]["validation_status"]
+    path = project / "iterations/v001/state/handoff.json"
+    return json.loads(path.read_text(encoding="utf-8"))["state"]["validation_status"]
+
 
 def paper_content_status(project: Path) -> object:
-    return json.loads((project / "iterations/v001/paper/frozen-content.json").read_text())["status"]
+    path = project / "iterations/v001/paper/frozen-content.json"
+    return json.loads(path.read_text(encoding="utf-8"))["status"]
+
 
 def paper_manifest(project: Path) -> dict[str, object]:
-    return json.loads((project / "iterations/v001/paper/paper_manifest.json").read_text())
+    path = project / "iterations/v001/paper/paper_manifest.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def _compiler_on_host() -> tuple[str, Path] | None:
+    for name in ("tectonic", "latexmk", "xelatex"):
+        candidate = shutil.which(name)
+        if candidate:
+            return name, Path(candidate).resolve()
+    return None
 
 
 def _png(path: Path, width: int = 1200, height: int = 800) -> None:
@@ -125,6 +153,8 @@ class EndToEndFixtureTests(unittest.TestCase):
         return compiler
 
     def _environment(self, compiler: Path, *, validation: str = "pass") -> Path:
+        compiler_name = compiler.name if compiler.name in {"tectonic", "latexmk", "xelatex"} else "xelatex"
+        engine = "tectonic" if compiler_name == "tectonic" else "xelatex"
         path = self.project / "qa/environment.json"
         payload = {
             "status": "pass",
@@ -133,8 +163,8 @@ class EndToEndFixtureTests(unittest.TestCase):
             "packages": [],
             "latex": {
                 "status": "pass",
-                "selected": "xelatex",
-                "tools": [{"name": "xelatex", "status": "available", "path": str(compiler), "sha256": sha256_file(compiler), "version": "fixture compiler 1"}],
+                "selected": engine,
+                "tools": [{"name": compiler_name, "status": "available", "path": str(compiler), "sha256": sha256_file(compiler), "version": "fixture compiler 1"}],
                 "message": "fixture/test-data",
             },
             "pdf_renderer": {"name": "pdftoppm", "status": "not_supplied", "path": None, "sha256": None, "version_command": None, "version_exit_code": None, "version_signature": None, "version_output": None, "version_output_sha256": None, "trust_basis": "fixture/test-data"},
@@ -170,22 +200,23 @@ class EndToEndFixtureTests(unittest.TestCase):
             self.assertEqual(1729, output["seed"])
             for metric in output["metrics"].values():
                 self.assertIsInstance(metric["value"], (int, float))
-                self.assertTrue(metric["value"] == metric["value"])
+                self.assertTrue(math.isfinite(metric["value"]))
                 self.assertIn("unit", metric)
             metric = self.iteration / f"results/{q}-metric.json"; metric.write_text('{"score":0.75,"unit":"dimensionless"}\n')
             result = self.iteration / f"results/{q}-result.json"; result.write_text(json.dumps(_result(q.upper(), f"results/{q}-metric.json", sha256_file(metric), f"run-{q}-001"), sort_keys=True, ensure_ascii=False) + "\n")
+            self.assertEqual([], validate_result_payload(json.loads(result.read_text(encoding="utf-8"))))
         figdir = self.iteration / "figures"; _png(figdir / "q1-fit.png")
         fm = self.iteration / "manifests/q1-fit.json"
-        fm.write_text(json.dumps({"schema_version":"1","figure_id":"q1-fit","role":"evidence","question_id":"Q1","claim_id":"claim-q1-01","claim_type":"data","exploratory_draft":False,"sources":[{"path":"results/q1-result.json","sha256":sha256_file(self.iteration/'results/q1-result.json')}],"outputs":[{"path":"figures/q1-fit.png","format":"png","width_px":1200,"height_px":800,"dpi_x":300,"dpi_y":300}],"axes":[{"id":"x","label":"month","unit":"month"},{"id":"y","label":"demand","unit":"items"}],"legend":{"present":False,"reason":"single series"},"caption":"Q1 fit","paper_reference":"Figure 1","paper_width_mm":85,"grayscale_status":"pass","colorblind_status":"pass","render_status":"pass","status":"draft"}, ensure_ascii=False))
+        q1_output = self.iteration / "results/q1-run/output.json"
+        q1_payload = json.loads(q1_output.read_text(encoding="utf-8"))
+        fm.write_text(json.dumps({"schema_version":"1","figure_id":"q1-fit","role":"evidence","question_id":"Q1","claim_id":"claim-q1-01","claim_type":"data","exploratory_draft":False,"sources":[{"path":"results/q1-run/output.json","sha256":sha256_file(q1_output)}],"outputs":[{"path":"figures/q1-fit.png","format":"png","width_px":1200,"height_px":800,"dpi_x":300,"dpi_y":300}],"axes":[{"id":"x","label":"month","unit":"month"},{"id":"y","label":"demand","unit":"items"}],"legend":{"present":False,"reason":"single series"},"caption":f"Q1 fit from {len(q1_payload['series'])} regression points; fixture/test-data","paper_reference":"Figure 1","paper_width_mm":85,"grayscale_status":"pass","colorblind_status":"pass","render_status":"pass","status":"draft"}, ensure_ascii=False))
         self.assertEqual("verified", refresh_figure_status(fm, project_root=self.iteration)["status"])
         self.assertEqual("verified", figure_status(self.project, "q1-fit"))
         (self.iteration / "state/handoff.json").write_text(json.dumps({"state":{"validation_status":"pass","invalidated_stages":[]},"artifacts":[]}) + "\n")
-        for name, kind in (("q1-result.json","result-contract"),("q1-run/run_manifest.json","run-manifest"),("q1-fit.json","figure-manifest")):
-            p = self.iteration / ("manifests/" + name if name.endswith(".json") and "/" not in name else "results/" + name)
-            if not p.exists(): p = self.iteration / name
-        vm = self.iteration / "manifests/validation.json"; vm.write_text('{"validation_cycle_id":"v1","status":"pass"}\n')
-        rc = self.iteration / "manifests/result-contract.json"; rc.write_text('{"status":"confirmed"}\n')
-        rm = self.iteration / "manifests/run-manifest.json"; rm.write_text('{"status":"success"}\n')
+        vm = self.iteration / "manifests/validation.json"; vm.write_text('{"validation_cycle_id":"v1","status":"pass","fixture_label":"fixture/test-data"}\n')
+        rc = self.iteration / "manifests/result-contract.json"; rc.write_text('{"status":"confirmed","fixture_label":"fixture/test-data"}\n')
+        rm = self.iteration / "manifests/run-manifest.json"; rm.write_text('{"status":"success","fixture_label":"fixture/test-data"}\n')
+        self.assertEqual("fixture/test-data", json.loads(vm.read_text())["fixture_label"])
         from handoff_schema import user_event_challenge_sha256
         scope = [{"path": p.relative_to(self.project).as_posix(), "kind": k, "sha256": sha256_file(p)} for p, k in ((rc, "result-contract"), (rm, "run-manifest"), (vm, "validation-manifest"))]
         ordered = sorted(scope, key=lambda x: (x["kind"], x["path"]))
@@ -203,7 +234,11 @@ class EndToEndFixtureTests(unittest.TestCase):
         env = self._environment(compiler, validation=validation)
         if not propagate_stale:
             return compiler, env
+        data_path = self.project / "input/data.csv"
+        data_path.write_text(data_path.read_text(encoding="utf-8") + "7,150,90,72,4.0,5.5\n", encoding="utf-8")
         mark_stale(self.project, changed_paths=["input/data.csv"], question_ids=["Q2"])
+        stale = json.loads((self.project / "qa/staleness.json").read_text(encoding="utf-8"))
+        self.assertEqual(["run", "figure", "validation", "paper"], stale["invalidated"]["Q2"])
         current = load_current(self.project)
         self.assertEqual("stale", current["status"])
         create_iteration(self.project, reason="revise Q2", affected_questions=["Q2"])
@@ -263,6 +298,67 @@ class EndToEndFixtureTests(unittest.TestCase):
         logs = list((self.iteration / "paper/logs").glob("*.log"))
         self.assertTrue(logs)
         self.assertIn("fixture compiler stderr", logs[0].read_text(encoding="utf-8"))
+
+    def test_real_compiler_smoke_when_available(self) -> None:
+        detected = _compiler_on_host()
+        if detected is None:
+            self.skipTest("no supported compiler available")
+        name, compiler = detected
+        template = self.root / "real-compiler-template"
+        shutil.copytree(FIXTURE / "template", template)
+        main = template / "main.tex"
+        main.write_text(
+            main.read_text(encoding="utf-8").replace(
+                r"\documentclass{ctexart}",
+                r"\documentclass[fontset=none]{ctexart}",
+            ),
+            encoding="utf-8",
+        )
+        for generated in (
+            "paper-frontmatter.tex",
+            "paper-body.tex",
+            "paper-appendices.tex",
+        ):
+            (template / generated).write_text(
+                "Fixture/test-data real compiler smoke.\n",
+                encoding="utf-8",
+            )
+        build = template / "build"
+        build.mkdir()
+        if name == "tectonic":
+            command = [str(compiler), "--outdir", str(build), str(main)]
+        elif name == "latexmk":
+            command = [
+                str(compiler),
+                "-xelatex",
+                "-interaction=nonstopmode",
+                "-halt-on-error",
+                "-file-line-error",
+                f"-outdir={build}",
+                str(main),
+            ]
+        else:
+            command = [
+                str(compiler),
+                "-interaction=nonstopmode",
+                "-halt-on-error",
+                "-file-line-error",
+                "-output-directory",
+                str(build),
+                str(main),
+            ]
+        completed = subprocess.run(
+            command,
+            cwd=template,
+            check=False,
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        self.assertEqual(0, completed.returncode, completed.stdout + completed.stderr)
+        pdf = build / "main.pdf"
+        self.assertTrue(pdf.is_file())
 
 
 if __name__ == "__main__": unittest.main()
